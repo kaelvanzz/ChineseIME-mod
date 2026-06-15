@@ -23,8 +23,9 @@ public:
     IMEState getSnapshot() const;
     ChangeFlags checkChanges();
     void clearChanges();
-    void updateHklState(long hkl);
-    long getKeyboardLayout() const;
+    void updateHklState(LONG_PTR hkl);
+    void updateFromHkl(LONG_PTR hkl);
+    LONG_PTR getKeyboardLayout() const;
     bool checkLayoutChanged();
     void clearLayoutChanged();
     bool isChineseInputMethod() const;

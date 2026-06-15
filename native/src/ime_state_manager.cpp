@@ -126,12 +126,12 @@ bool ImeStateManager::isChineseInputMethod() const {
     return type != InputMethodType::ENGLISH && type != InputMethodType::UNKNOWN;
 }
 
-long ImeStateManager::getKeyboardLayout() const {
+LONG_PTR ImeStateManager::getKeyboardLayout() const {
     std::lock_guard<std::mutex> lock(mutex_);
     return state_.hkl;
 }
 
-void ImeStateManager::updateHklState(long hkl) {
+void ImeStateManager::updateHklState(LONG_PTR hkl) {
     std::lock_guard<std::mutex> lock(mutex_);
     if (state_.hkl != hkl) {
         state_.hkl = hkl;
@@ -145,7 +145,7 @@ void ImeStateManager::clearLayoutChanged() {
 }
 
 // Additional helper method to force update of internal state from HKL
-void ImeStateManager::updateFromHkl(long hkl) {
+void ImeStateManager::updateFromHkl(LONG_PTR hkl) {
     std::lock_guard<std::mutex> lock(mutex_);
     if (state_.hkl != hkl) {
         state_.hkl = hkl;

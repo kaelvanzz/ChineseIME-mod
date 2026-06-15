@@ -300,7 +300,7 @@ void TsfMonitor::pollUpdate() {
         !state.composition.empty() &&
         state.candidates.empty()) {
 
-        std::vector<std::wstring> windowCandidates = getCandidatesFromWindowEnumeration();
+        std::vector<std::wstring> windowCandidates = chineseime::collectCandidatesFromWindowEnumeration();
         if (!windowCandidates.empty()) {
             char dbg[128];
             sprintf_s(dbg, "[ChineseIME] Window enumeration found %d candidates\n",

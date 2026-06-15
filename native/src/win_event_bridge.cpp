@@ -167,9 +167,9 @@ void WinEventBridge::onImeMessage(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPa
             bool isChinese = (langId == 0x0804 || langId == 0x0404 ||
                              langId == 0x0C04 || langId == 0x1404);
 
-            ImeStateManager::get().updateChineseMode(isChinese);
-            ImeStateManager::get().updateImeOpen(isChinese);
-            ImeStateManager::get().updateHklState((long)(DWORD_PTR)hkl);
+             ImeStateManager::get().updateChineseMode(isChinese);
+             ImeStateManager::get().updateImeOpen(isChinese);
+             ImeStateManager::get().updateHklState((LONG_PTR)hkl);
 
             // WM_INPUTLANGCHANGE: notify Java of IME type change via imeModeChangeCallback
             auto& snap = ImeStateManager::get().getSnapshot();

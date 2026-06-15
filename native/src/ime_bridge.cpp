@@ -716,35 +716,35 @@ static int detectTypeFromHklInternal(HKL hkl) {
 }
 
 __declspec(dllexport) int GetInputMethodType() {
-    {
-        auto state = chineseime::ImeStateManager::get().getSnapshot();
-        if (state.inputMethodType != chineseime::InputMethodType::UNKNOWN) {
-            return static_cast<int>(state.inputMethodType);
+        {
+            auto state = chineseime::ImeStateManager::get().getSnapshot();
+            if (state.inputMethodType != chineseime::InputMethodType::UNKNOWN) {
+                return static_cast<int>(state.inputMethodType);
+            }
         }
-    }
 
-    HWND fgWnd = GetForegroundWindow();
-    if (fgWnd) {
-        HKL hkl = GetKeyboardLayout(GetWindowThreadProcessId(fgWnd, NULL));
-        if (hkl) {
-            // Update ImeStateManager with HKL state for better consistency
-            chineseime::ImeStateManager::get().updateHklState((long)hkl);
-            int t = detectTypeFromHklInternal(hkl);
-            if (t > 0) return t;
+        HWND fgWnd = GetForegroundWindow();
+        if (fgWnd) {
+            HKL hkl = GetKeyboardLayout(GetWindowThreadProcessId(fgWnd, NULL));
+            if (hkl) {
+                // Update ImeStateManager with HKL state for better consistency
+                chineseime::ImeStateManager::get().updateHklState(hkl);
+                int t = detectTypeFromHklInternal(hkl);
+                if (t > 0) return t;
+            }
         }
-    }
 
-    if (g_hwnd) {
-        HKL hkl = GetKeyboardLayout(GetWindowThreadProcessId(g_hwnd, NULL));
-        if (!hkl) hkl = GetKeyboardLayout(0);
-        if (hkl) {
-            // Update ImeStateManager with HKL state for better consistency
-            chineseime::ImeStateManager::get().updateHklState((long)hkl);
-            return detectTypeFromHklInternal(hkl);
+        if (g_hwnd) {
+            HKL hkl = GetKeyboardLayout(GetWindowThreadProcessId(g_hwnd, NULL));
+            if (!hkl) hkl = GetKeyboardLayout(0);
+            if (hkl) {
+                // Update ImeStateManager with HKL state for better consistency
+                chineseime::ImeStateManager::get().updateHklState(hkl);
+                return detectTypeFromHklInternal(hkl);
+            }
         }
-    }
 
-    return static_cast<int>(chineseime::InputMethodType::ENGLISH);
+        return static_cast<int>(chineseime::InputMethodType::ENGLISH);
 }
 
 __declspec(dllexport) int IsWindowHooked() {
