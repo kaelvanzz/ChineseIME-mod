@@ -29,7 +29,7 @@ enum class InputMethodType {
 
 struct IMEState {
     bool isValid = false;
-    long hkl = 0;
+    LONG_PTR hkl = 0;
     InputMethodType inputMethodType = InputMethodType::UNKNOWN;
     bool imeOpen = false;
     bool chineseMode = false;

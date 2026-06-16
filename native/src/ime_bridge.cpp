@@ -56,9 +56,10 @@ bool containsChinese(const wchar_t* str) {
 }
 
 bool compositionLocationNotify(HWND hWnd) {
-    if (!g_hwnd) return false;
+    HWND target = hWnd ? hWnd : g_hwnd;
+    if (!target) return false;
 
-    HIMC imc = ImmGetContext(g_hwnd);
+    HIMC imc = ImmGetContext(target);
     if (!imc) return false;
 
     POINT pt = {0, 0};
@@ -72,7 +73,7 @@ bool compositionLocationNotify(HWND hWnd) {
     candForm.rcArea.bottom = 0;
 
     ImmSetCandidateWindow(imc, &candForm);
-    ImmReleaseContext(g_hwnd, imc);
+    ImmReleaseContext(target, imc);
     return true;
 }
 
@@ -116,8 +117,10 @@ void readCandidates(HIMC himc) {
             }
             std::vector<const wchar_t*> ptrs;
             for (auto& c : cands) ptrs.push_back(c.c_str());
+            int selIdx = (int)candList->dwSelection;
+            if (selIdx >= (int)count) selIdx = (int)count - 1;
             if (g_javaCandidates) {
-                g_javaCandidates(ptrs.data(), (int)cands.size(), (int)candList->dwSelection);
+                g_javaCandidates(ptrs.data(), (int)cands.size(), selIdx);
             }
             return;
         }
@@ -193,7 +196,8 @@ static LRESULT CALLBACK MessageGetMsgProc(int code, WPARAM wParam, LPARAM lParam
                             LONG len = ImmGetCompositionStringW(himc, GCS_COMPSTR, NULL, 0);
                             int cursor = 0;
                             if (msg->lParam & GCS_CURSORPOS) {
-                                cursor = ImmGetCompositionStringW(himc, GCS_CURSORPOS, NULL, 0);
+                                LONG cursorBytes = ImmGetCompositionStringW(himc, GCS_CURSORPOS, NULL, 0);
+                                cursor = (cursorBytes >= 0) ? cursorBytes / sizeof(wchar_t) : 0;
                             }
                             if (len > 0) {
                                 std::vector<wchar_t> buf(len / sizeof(wchar_t) + 1);
@@ -265,7 +269,8 @@ LRESULT CALLBACK ImeWndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam) {
                 LONG len = ImmGetCompositionStringW(himc, GCS_COMPSTR, NULL, 0);
                 int cursor = 0;
                 if (lParam & GCS_CURSORPOS) {
-                    cursor = ImmGetCompositionStringW(himc, GCS_CURSORPOS, NULL, 0);
+                    LONG cursorBytes = ImmGetCompositionStringW(himc, GCS_CURSORPOS, NULL, 0);
+                    cursor = (cursorBytes >= 0) ? cursorBytes / sizeof(wchar_t) : 0;
                 }
 
                 if (len > 0) {
@@ -543,6 +548,9 @@ __declspec(dllexport) int GetCompositionString(wchar_t* buffer, int bufferSize) 
         HWND fgWnd = GetForegroundWindow();
         if (fgWnd && fgWnd != hwndToTry) {
             himc = ImmGetContext(fgWnd);
+            if (himc) {
+                hwndToTry = fgWnd;
+            }
         }
         if (!himc) return 0;
     }
@@ -772,8 +780,10 @@ __declspec(dllexport) void RefreshCandidates() {
                     }
                     std::vector<const wchar_t*> ptrs;
                     for (auto& c : cands) ptrs.push_back(c.c_str());
+                    int selIdx = (int)candList->dwSelection;
+                    if (selIdx >= (int)count) selIdx = (int)count - 1;
                     if (g_javaCandidates) {
-                        g_javaCandidates(ptrs.data(), (int)ptrs.size(), (int)candList->dwSelection);
+                        g_javaCandidates(ptrs.data(), (int)ptrs.size(), selIdx);
                     }
                 }
             }

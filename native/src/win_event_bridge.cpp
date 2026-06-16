@@ -202,7 +202,8 @@ void WinEventBridge::readComposition(HIMC himc, LPARAM lParam) {
         }
     }
     if (lParam & GCS_CURSORPOS) {
-        cursorPos = ImmGetCompositionStringW(himc, GCS_CURSORPOS, nullptr, 0);
+        LONG cursorBytes = ImmGetCompositionStringW(himc, GCS_CURSORPOS, nullptr, 0);
+        cursorPos = (cursorBytes >= 0) ? cursorBytes / sizeof(wchar_t) : 0;
     }
 
     ImeStateManager::get().updateComposition(newComposition);

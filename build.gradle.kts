@@ -20,6 +20,9 @@ loom {
 
 repositories {
     mavenCentral()
+    maven("https://maven.aliyun.com/repository/public/") {
+        name = "AliyunMirror"
+    }
     maven("https://maven.fabricmc.net/")
     // Cloth Config (AutoConfig 依赖)
     maven("https://maven.shedaniel.me/")
