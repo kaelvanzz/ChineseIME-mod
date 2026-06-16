@@ -11,6 +11,9 @@
   "entrypoints": {
     "client": [
       "com.example.chineseime.ChineseIMEInitializer"
+    ],
+    "modmenu": [
+      "com.example.chineseime.config.ModMenuIntegration"
     ]
   },
   "mixins": [
@@ -19,15 +22,10 @@
   "depends": {
     "fabricloader": ">=0.16.9",
     "minecraft": "~1.21.4",
-    "fabric-api": ">=0.110.0"
-  },
-  "recommends": {
-    "cloth-config": ">=15.0.0",
+    "fabric-api": ">=0.110.0",
     "modmenu": ">=12.0.0"
   },
-  "custom": {
-    "modmenu": {
-      "config": "chineseime"
-    }
+  "recommends": {
+    "cloth-config": ">=15.0.0"
   }
 }

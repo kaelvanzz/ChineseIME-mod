@@ -50,6 +50,7 @@ dependencies {
     
     // ModMenu (配置界面入口)
     modImplementation("com.terraformersmc:modmenu:12.0.0-beta.1")
+    modApi("com.terraformersmc:modmenu:12.0.0-beta.1")
     
     // JNA (Java Native Access) - 用于调用Windows IMM32/TSF API
     implementation("net.java.dev.jna:jna:5.14.0")
