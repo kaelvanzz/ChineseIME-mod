@@ -3,6 +3,7 @@
 #include <cstdint>
 #include <string>
 #include <vector>
+#include <windows.h>
 
 #ifdef _WIN32
 #ifdef CHINESEIME_EXPORTS
