@@ -9,38 +9,51 @@ namespace chineseime {
 static const std::wstring_view CANDIDATE_WINDOW_CLASSES[] = {
     // Standard Windows IME classes
     L"Cicero", L"IME", L"MSWinCls", L"IMJPCnd", L"CnCand",
-    
-    // Sogou IME (搜狗拼音) and variants
-    L"SHGJE",     // Sogou
+
+    // Sogou IME (搜狗拼音) and variants — comprehensive coverage
+    L"SHGJE",     // Sogou main class
     L"SoPYComp",  // Sogou composition window
     L"SogouPY",   // Sogou candidate window
     L"SogouInput", // Sogou Input
     L"SogouPYIM", // Sogou Pinyin IME
     L"SogouCJIM", // Sogou Cangjie IME
-    
+    L"SogouWBIM", // Sogou Wubi IME
+    L"SogouSkin", // Sogou skin window
+    L"SogouDLG",  // Sogou dialog/popup
+    L"SogouTool", // Sogou toolbar
+    L"SogouGID",  // Sogou global input dialog
+    L"SogouIM",   // Sogou IM window
+    L"SGHWND",    // Sogou HWND class
+    L"SGEdit",    // Sogou edit
+    L"SoGou",     // Alternative capitalization
+    L"sogou",     // lowercase
+
     // Tencent QQ Pinyin (QQ拼音) and Wubi (QQ五笔)
     L"TTEdit",    // Tencent
     L"TTF",       // Tencent
     L"QQPY",      // QQ Pinyin
     L"QQWubi",    // QQ Wubi
     L"QQInput",   // QQ Input
-    
+    L"QQPYIM",    // QQ Pinyin IM
+    L"QQTool",    // QQ toolbar
+
     // Baidu IME (百度拼音)
     L"Ba IME",    // Baidu
     L"BaiduPY",   // Baidu Pinyin
     L"BaiduInput", // Baidu Input
-    
+    L"BaiduIM",   // Baidu IM
+
     // Microsoft IME
     L"mscand",    // Microsoft
     L"MSIM",      // Microsoft IME
     L"MSPYIM",   // Microsoft Pinyin IME
     L"MSZYIM",   // Microsoft Zhuyin IME
-    
+
     // Google Pinyin (谷歌拼音)
     L"GooglePinyin", // Google Pinyin
     L"GPY",       // Google Pinyin
     L"GoogleIME",  // Google IME
-    
+
     // Third-party IMEs
     L"Xiaobang",  // Xiaobang/小帮
     L"Jidian",    // Jidian/极点五笔
@@ -58,7 +71,7 @@ static const std::wstring_view CANDIDATE_WINDOW_CLASSES[] = {
     L"CCInput",   // 超强输入法
     L"Newpy",     // 新型拼音
     L"Ying", L"Shuang", L"WB",
-    
+
     // Additional third-party IMEs
     L"Sougou",    // Alternative spelling
     L"SougouPY",
@@ -395,20 +408,21 @@ static BOOL CALLBACK enumCandidateWindowsProc(HWND hwnd, LPARAM lParam) {
     if (actualLen <= 0) return TRUE;
     windowText.resize(actualLen);
 
-    bool hasCandidateContent = false;
-    for (wchar_t c : windowText) {
-        if (c >= 0x4E00 && c <= 0x9FFF) { hasCandidateContent = true; break; }
-        if ((c >= L'0' && c <= L'9') && !windowText.empty()) { hasCandidateContent = true; break; }
-    }
-    if (!hasCandidateContent) return TRUE;
-
     char dbg[384];
     sprintf_s(dbg, "[ChineseIME] Candidate window: class=%S, text='%S'\n", classStr, windowText.c_str());
     OutputDebugStringA(dbg);
 
+    bool hasCandidateContent = false;
+    for (wchar_t c : windowText) {
+        if (c >= 0x4E00 && c <= 0x9FFF) { hasCandidateContent = true; break; }
+        if (c >= L'0' && c <= L'9' && !windowText.empty()) { hasCandidateContent = true; break; }
+    }
+    if (!hasCandidateContent) return TRUE;
+
+    bool hasChinese = false;
     std::wstring current;
     for (wchar_t c : windowText) {
-        if (c == L'\n' || c == L'\r') {
+        if (c == L'\n' || c == L'\r' || c == L'\t' || c == L' ') {
             if (!current.empty()) {
                 size_t dotPos = current.find(L'.');
                 if (dotPos != std::wstring::npos && dotPos < 4) {
@@ -418,12 +432,12 @@ static BOOL CALLBACK enumCandidateWindowsProc(HWND hwnd, LPARAM lParam) {
                     current = current.substr(1);
                 }
                 if (!current.empty()) {
-                    bool hasChinese = false;
                     for (wchar_t ch : current) {
                         if (ch >= 0x4E00 && ch <= 0x9FFF) { hasChinese = true; break; }
                     }
                     if (hasChinese && current.size() <= 20) {
                         results->push_back(current);
+                        hasChinese = false;
                     }
                 }
                 current.clear();
@@ -442,7 +456,6 @@ static BOOL CALLBACK enumCandidateWindowsProc(HWND hwnd, LPARAM lParam) {
             current = current.substr(1);
         }
         if (!current.empty()) {
-            bool hasChinese = false;
             for (wchar_t ch : current) {
                 if (ch >= 0x4E00 && ch <= 0x9FFF) { hasChinese = true; break; }
             }
@@ -455,9 +468,99 @@ static BOOL CALLBACK enumCandidateWindowsProc(HWND hwnd, LPARAM lParam) {
     return TRUE;
 }
 
+// ── Extended Sogou-specific candidate window search ──
+// Sogou uses non-standard windows for candidates; this catches them
+// by searching for ANY visible window with numbered Chinese candidate text
+static BOOL CALLBACK enumSogouCandidatesProc(HWND hwnd, LPARAM lParam) {
+    auto* results = reinterpret_cast<std::vector<std::wstring>*>(lParam);
+
+    if (!IsWindowVisible(hwnd)) return TRUE;
+    if (!IsWindowEnabled(hwnd)) return TRUE;
+
+    int textLen = GetWindowTextLengthW(hwnd);
+    if (textLen <= 0 || textLen > 1024) return TRUE;
+
+    std::wstring windowText;
+    windowText.resize(textLen + 1);
+    int actualLen = GetWindowTextW(hwnd, &windowText[0], textLen + 1);
+    if (actualLen <= 0) return TRUE;
+    windowText.resize(actualLen);
+
+    bool hasDigit = false;
+    bool hasChinese = false;
+    for (wchar_t c : windowText) {
+        if (c >= L'0' && c <= L'9') hasDigit = true;
+        if (c >= 0x4E00 && c <= 0x9FFF) hasChinese = true;
+    }
+
+    if (!hasDigit || !hasChinese) return TRUE;
+
+    char dbg[256];
+    sprintf_s(dbg, "[ChineseIME] Sogou candidate search: text='%S'\n", windowText.c_str());
+    OutputDebugStringA(dbg);
+
+    std::wstring current;
+    for (wchar_t c : windowText) {
+        if (c == L'\n' || c == L'\r' || c == L'\t' || c == L' ') {
+            if (!current.empty()) {
+                size_t dotPos = current.find(L'.');
+                if (dotPos != std::wstring::npos && dotPos < 4) {
+                    current = current.substr(dotPos + 1);
+                }
+                while (!current.empty() && (current[0] == L' ' || current[0] == L'\t')) {
+                    current = current.substr(1);
+                }
+                if (!current.empty() && current.size() <= 20) {
+                    bool hasCh = false;
+                    for (wchar_t ch : current) {
+                        if (ch >= 0x4E00 && ch <= 0x9FFF) { hasCh = true; break; }
+                    }
+                    if (hasCh) {
+                        results->push_back(current);
+                    }
+                }
+                current.clear();
+            }
+        } else {
+            current += c;
+        }
+    }
+    if (!current.empty() && results->empty()) {
+        size_t dotPos = current.find(L'.');
+        if (dotPos != std::wstring::npos && dotPos < 4) {
+            current = current.substr(dotPos + 1);
+        }
+        while (!current.empty() && (current[0] == L' ' || current[0] == L'\t')) {
+            current = current.substr(1);
+        }
+        if (!current.empty() && current.size() <= 20) {
+            bool hasCh = false;
+            for (wchar_t ch : current) {
+                if (ch >= 0x4E00 && ch <= 0x9FFF) { hasCh = true; break; }
+            }
+            if (hasCh) {
+                results->push_back(current);
+            }
+        }
+    }
+
+    return TRUE;
+}
+
 std::vector<std::wstring> collectCandidatesFromWindowEnumeration() {
     std::vector<std::wstring> candidates;
+
+    // First pass: standard candidate window enumeration
     EnumWindows(enumCandidateWindowsProc, reinterpret_cast<LPARAM>(&candidates));
+
+    // Second pass: Sogou-specific broad search
+    // This catches Sogou popup windows that don't match standard class names
+    EnumWindows(enumSogouCandidatesProc, reinterpret_cast<LPARAM>(&candidates));
+
+    // Deduplicate results
+    std::sort(candidates.begin(), candidates.end());
+    candidates.erase(std::unique(candidates.begin(), candidates.end()), candidates.end());
+
     return candidates;
 }
 

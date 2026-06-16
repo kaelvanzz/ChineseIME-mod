@@ -20,7 +20,6 @@ public class KeyBindingManager {
     private boolean ctrlShiftFPressed = false;
     private boolean prevToggleImePressed = false;
     private boolean prevToggleModePressed = false;
-    private boolean prevOpenConfigPressed = false;
 
     public KeyBindingManager(ModConfig config, PlatformIMEManager ime) {
         this.config = config;
@@ -69,18 +68,8 @@ public class KeyBindingManager {
             this.ctrlShiftFPressed = false;
         }
 
-        if (ctrl && GLFW.glfwGetKey(win, GLFW.GLFW_KEY_G) == GLFW.GLFW_PRESS) {
-            if (!this.prevOpenConfigPressed) {
-                if (mc.currentScreen instanceof ConfigScreen) {
-                    mc.currentScreen.close();
-                } else {
-                    mc.setScreen(new ConfigScreen(mc.currentScreen, this.config));
-                }
-                this.prevOpenConfigPressed = true;
-            }
-        } else {
-            this.prevOpenConfigPressed = false;
-        }
+        // openConfig keybinding (Ctrl+G / comma) is handled by openConfig.wasPressed() below
+        // to avoid double-toggle when both the raw handler and keybinding fire together
 
         if (this.openConfig.wasPressed()) {
             if (mc.currentScreen instanceof ConfigScreen) {

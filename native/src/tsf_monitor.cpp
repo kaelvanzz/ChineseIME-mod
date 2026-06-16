@@ -292,19 +292,23 @@ void TsfMonitor::pollUpdate() {
 
     // FALLBACK: If IMM32 returned 0 candidates but we're in Chinese mode,
     // try reading candidates from the IME's candidate window directly.
-    // This is needed for TSF IMEs like Microsoft Pinyin that don't use
-    // TSF UIElement callbacks for their candidate list.
+    // This is needed for TSF IMEs like Microsoft Pinyin and Sogou that
+    // don't reliably expose candidates via IMM32 or TSF UIElement callbacks.
     auto state = ImeStateManager::get().getSnapshot();
-    if (state.inputMethodType != InputMethodType::ENGLISH &&
+    bool needsFallback = (state.inputMethodType != InputMethodType::ENGLISH &&
         state.inputMethodType != InputMethodType::UNKNOWN &&
-        !state.composition.empty() &&
-        state.candidates.empty()) {
+        state.candidates.empty());
+    bool needsFallbackEvenWithComp = needsFallback && !state.composition.empty();
+    // Sogou may show candidates even with empty composition
+    bool sogouNeedsFallback = (state.inputMethodType == InputMethodType::SOGOU ||
+        state.inputMethodType == InputMethodType::PINYIN) && state.candidates.empty();
 
+    if (needsFallbackEvenWithComp || sogouNeedsFallback) {
         std::vector<std::wstring> windowCandidates = chineseime::collectCandidatesFromWindowEnumeration();
         if (!windowCandidates.empty()) {
             char dbg[128];
-            sprintf_s(dbg, "[ChineseIME] Window enumeration found %d candidates\n",
-                (int)windowCandidates.size());
+            sprintf_s(dbg, "[ChineseIME] Window enumeration found %d candidates (type=%d)\n",
+                (int)windowCandidates.size(), (int)state.inputMethodType);
             OutputDebugStringA(dbg);
             ImeStateManager::get().updateCandidates(state.composition, windowCandidates, 0);
         }

@@ -226,13 +226,20 @@ static LRESULT CALLBACK MessageGetMsgProc(int code, WPARAM wParam, LPARAM lParam
                     if (g_javaPreedit) g_javaPreedit(L"", 0, 0);
                 }
                 else if (msg->message == WM_IME_NOTIFY) {
-                    if (msg->wParam == IMN_OPENCANDIDATE || msg->wParam == IMN_CHANGECANDIDATE) {
+                    if (msg->wParam == IMN_OPENCANDIDATE || msg->wParam == IMN_CHANGECANDIDATE || msg->wParam == IMN_PRIVATE) {
                         compositionLocationNotify(msg->hwnd);
                         g_compositionLocationNotified = true;
                         HIMC himcTmp = ImmGetContext(msg->hwnd);
                         if (himcTmp) {
                             readCandidates(himcTmp);
                             ImmReleaseContext(msg->hwnd, himcTmp);
+                        }
+                    } else if (msg->wParam == IMN_CLOSECANDIDATE) {
+                        // Sogou may close candidates without opening a new window
+                        // Clear candidates on close
+                        if (g_javaCandidates) {
+                            const wchar_t* empty = nullptr;
+                            g_javaCandidates(&empty, 0, 0);
                         }
                     }
                 }
