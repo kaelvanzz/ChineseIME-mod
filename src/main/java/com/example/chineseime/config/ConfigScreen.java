@@ -385,6 +385,8 @@ public class ConfigScreen extends Screen {
     public boolean mouseClicked(double mouseX, double mouseY, int button) {
         int mx = (int) mouseX;
         int my = (int) mouseY;
+        this.mouseX = mx;
+        this.mouseY = my;
 
         if (waitingForKeybind) {
             waitingForKeybind = false;
@@ -530,7 +532,7 @@ public class ConfigScreen extends Screen {
             if (!currentCapturedKeys.contains(keyCode)) {
                 currentCapturedKeys.add(keyCode);
             }
-            int idx = getHoveredItem(mouseX, mouseY);
+            int idx = getHoveredItem(this.mouseX, this.mouseY);
             if (idx >= 0) {
                 Item item = items.get(idx);
                 if (item.type == ItemType.SHORTCUT_TOGGLE_IME) {

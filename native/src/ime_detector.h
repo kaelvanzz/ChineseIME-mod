@@ -19,6 +19,6 @@ bool IsChineseLangId(LANGID langId);
 
 const wchar_t* getInputMethodTypeName(InputMethodType type);
 
-std::vector<std::wstring> collectCandidatesFromWindowEnumeration(HWND foregroundWindow = nullptr);
+std::vector<std::wstring> collectCandidatesFromWindowEnumeration();
 
 } // namespace chineseime

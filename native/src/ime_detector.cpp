@@ -423,7 +423,7 @@ static BOOL CALLBACK enumCandidateWindowsProc(HWND hwnd, LPARAM lParam) {
     return TRUE;
 }
 
-std::vector<std::wstring> collectCandidatesFromWindowEnumeration(HWND foregroundWindow) {
+std::vector<std::wstring> collectCandidatesFromWindowEnumeration() {
     std::vector<std::wstring> candidates;
     EnumWindows(enumCandidateWindowsProc, reinterpret_cast<LPARAM>(&candidates));
     return candidates;

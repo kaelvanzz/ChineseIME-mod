@@ -320,17 +320,13 @@ public class CandidateHud {
             cx += compoW + compoMinGap;
         }
 
+        int itemX = cx;
         for (int i = start; i < end; i++) {
             String cand = this.candidates.get(i);
             boolean isSelected = i == this.selected;
             int localIndex = (i - start) + 1;
             int localIdx = i - start;
             int itemW = itemWidths[localIdx];
-
-            int itemX = cx;
-            for (int j = 0; j < localIdx; j++) {
-                itemX += itemWidths[j] + gap;
-            }
 
             if (isSelected) {
                 ctx.fill(itemX, py + highlightMargin,
@@ -347,6 +343,8 @@ public class CandidateHud {
 
             ctx.drawText(font, numStr, textX, textY, NUM_COLOR, false);
             ctx.drawText(font, cand, textX + numW + numPad, textY, TEXT_COLOR, false);
+
+            itemX += itemW + gap;
         }
 
         if (visibleCount > 0) {

@@ -163,16 +163,8 @@ public class ModConfig {
     }
 
     public void cycleInputMode() {
-        if (this.windowsLocked) {
-            if (this.inputMode == InputMode.PINYIN) {
-                this.inputMode = InputMode.RIME;
-            } else {
-                this.inputMode = InputMode.PINYIN;
-            }
-        } else {
-            InputMode[] modes = InputMode.values();
-            this.inputMode = modes[(this.inputMode.ordinal() + 1) % modes.length];
-        }
+        InputMode[] modes = InputMode.values();
+        this.inputMode = modes[(this.inputMode.ordinal() + 1) % modes.length];
         this.save();
     }
 
