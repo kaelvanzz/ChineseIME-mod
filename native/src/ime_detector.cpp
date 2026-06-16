@@ -303,14 +303,14 @@ InputMethodType detectInputMethodTypeFromHkl(HKL hkl) {
     // Fallback: try to get IME description for unrecognized Chinese IMEs
     if (type == InputMethodType::OTHER_CHINESE) {
         // Attempt to get IME description to identify specific variants
-        char desc[256] = {0};
-        if (ImmGetDescription(hkl, desc, sizeof(desc)) > 0) {
+        wchar_t desc[256] = {0};
+        if (ImmGetDescriptionW(hkl, desc, _countof(desc)) > 0) {
             // Check for Microsoft New Zhuyin
-            if (strstr(desc, "新注音") != nullptr || strstr(desc, "New Zhuyin") != nullptr) {
+            if (wcsstr(desc, L"\u65B0\u6CE8\u97F3") != nullptr || wcsstr(desc, L"New Zhuyin") != nullptr) {
                 return InputMethodType::ZHUYIN;
             }
             // Check for Sogou Cangjie
-            if (strstr(desc, "倉輸") != nullptr || strstr(desc, "Cangjie") != nullptr) {
+            if (wcsstr(desc, L"\u5109\u8F93") != nullptr || wcsstr(desc, L"Cangjie") != nullptr) {
                 return InputMethodType::CANGJIE;
             }
             // Additional fallbacks for other variants can be added here

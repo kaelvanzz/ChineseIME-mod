@@ -147,7 +147,7 @@ public class WindowsIMEBridgeNative {
             return false;
         }
         try {
-            return NativeImeBridge.getInstance().IsWindow(hwnd) != 0;
+            return NativeImeBridge.getInstance().IsWindowValid(hwnd) != 0;
         } catch (Exception e) {
             ChineseIMEInitializer.LOGGER.debug("[ChineseIME] Error checking window validity: {}", e.getMessage());
             return false;
@@ -157,7 +157,7 @@ public class WindowsIMEBridgeNative {
     private boolean tryHookWindowProc(long hwnd) {
         try {
             NativeImeBridge.hookWindowProc(hwnd);
-            return NativeImeBridge.isWindowHooked() != 0;
+            return NativeImeBridge.isWindowHooked();
         } catch (Exception e) {
             ChineseIMEInitializer.LOGGER.debug("[ChineseIME] WndProc hook failed: {}", e.getMessage());
             return false;

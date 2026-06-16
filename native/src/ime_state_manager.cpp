@@ -10,10 +10,6 @@ ImeStateManager& ImeStateManager::get() {
     return instance;
 }
 
-InputMethodType detectInputMethodTypeFromImeId(WORD imeId, LANGID langId) {
-    return chineseime::detectInputMethodTypeFromImeId(imeId, langId);
-}
-
 void ImeStateManager::updateInputMethod(InputMethodType type) {
     std::lock_guard<std::mutex> lock(mutex_);
     if (state_.inputMethodType != type) {
@@ -152,7 +148,7 @@ void ImeStateManager::updateFromHkl(LONG_PTR hkl) {
         state_.layoutChangeCount++;
         
         // Update input method type based on HKL
-        DWORD_PTR hklVal = reinterpret_cast<DWORD_PTR>(hkl);
+        DWORD_PTR hklVal = static_cast<DWORD_PTR>(hkl);
         WORD imeId = HIWORD(hklVal);
         LANGID langId = LOWORD(hklVal);
         

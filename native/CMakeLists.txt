@@ -6,12 +6,13 @@ set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
 # Windows DLL
 add_library(chineseime_native SHARED
-src/ime_bridge.cpp
-src/sta_thread.cpp
-src/ime_state_manager.cpp
-src/tsf_monitor.cpp
-src/imm32_monitor.cpp
-src/win_event_bridge.cpp
+    src/ime_bridge.cpp
+    src/sta_thread.cpp
+    src/ime_state_manager.cpp
+    src/ime_detector.cpp
+    src/tsf_monitor.cpp
+    src/imm32_monitor.cpp
+    src/win_event_bridge.cpp
 )
 
 # Include directories

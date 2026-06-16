@@ -264,6 +264,7 @@ public class NativeImeBridge {
         int InstallMessageHook(long hwnd);
         void UnhookWindowProc();
         int IsWindowHooked();
+        int IsWindowValid(long hwnd);
         int GetCompositionString(char[] buffer, int bufferSize);
         int GetCandidateCount();
         int GetCandidate(int index, char[] buffer, int bufferSize);

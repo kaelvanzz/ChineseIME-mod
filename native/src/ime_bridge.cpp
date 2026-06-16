@@ -728,7 +728,7 @@ __declspec(dllexport) int GetInputMethodType() {
             HKL hkl = GetKeyboardLayout(GetWindowThreadProcessId(fgWnd, NULL));
             if (hkl) {
                 // Update ImeStateManager with HKL state for better consistency
-                chineseime::ImeStateManager::get().updateHklState(hkl);
+                chineseime::ImeStateManager::get().updateHklState((LONG_PTR)hkl);
                 int t = detectTypeFromHklInternal(hkl);
                 if (t > 0) return t;
             }
@@ -739,7 +739,7 @@ __declspec(dllexport) int GetInputMethodType() {
             if (!hkl) hkl = GetKeyboardLayout(0);
             if (hkl) {
                 // Update ImeStateManager with HKL state for better consistency
-                chineseime::ImeStateManager::get().updateHklState(hkl);
+                chineseime::ImeStateManager::get().updateHklState((LONG_PTR)hkl);
                 return detectTypeFromHklInternal(hkl);
             }
         }
@@ -749,6 +749,10 @@ __declspec(dllexport) int GetInputMethodType() {
 
 __declspec(dllexport) int IsWindowHooked() {
     return g_hookInstalled ? 1 : 0;
+}
+
+__declspec(dllexport) int IsWindowValid(HWND hwnd) {
+    return ::IsWindow(hwnd) ? 1 : 0;
 }
 
 __declspec(dllexport) void RefreshCandidates() {
