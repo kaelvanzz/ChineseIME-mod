@@ -94,10 +94,28 @@ static const KnownTsfIme KNOWN_TSF_IMES[] = {
     { 0x6024B45F, 0, 0, InputMethodType::SUCHENG,   "MS Sucheng" },
     { 0xB115690A, 0, 0, InputMethodType::ZHUYIN,    "MS Zhuyin" },
 
-    // Common third-party IME CLSID Data1 values
-    // Sogou Pinyin (搜狗拼音) — common CLSID prefix
-    { 0xCC43E0DD, 0, 0, InputMethodType::PINYIN,    "Sogou Pinyin" },
-    { 0x54A3ED60, 0, 0, InputMethodType::PINYIN,    "Sogou Pinyin v2" },
+    // Sogou Pinyin (搜狗拼音) — multiple CLSIDs for different versions
+    { 0xCC43E0DD, 0, 0, InputMethodType::SOGOU,     "Sogou Pinyin" },
+    { 0x54A3ED60, 0, 0, InputMethodType::SOGOU,     "Sogou Pinyin v2" },
+    { 0x9C4E1D1A, 0, 0, InputMethodType::SOGOU,     "Sogou Pinyin v3" },
+    { 0x7B3E8B2F, 0, 0, InputMethodType::SOGOU,     "Sogou Pinyin v4" },
+    { 0xE8B4A1C5, 0, 0, InputMethodType::SOGOU,     "Sogou Pinyin v5" },
+    { 0xF1D3C8E7, 0, 0, InputMethodType::SOGOU,     "Sogou Pinyin v6" },
+    { 0xA9B6D2F0, 0, 0, InputMethodType::SOGOU,     "Sogou Pinyin v7" },
+    { 0x2E5C7B3A, 0, 0, InputMethodType::SOGOU,     "Sogou Pinyin v8" },
+    { 0xD4A8F1C3, 0, 0, InputMethodType::SOGOU,     "Sogou Pinyin v9" },
+    { 0x6B9E2D5F, 0, 0, InputMethodType::SOGOU,     "Sogou Pinyin v10+" },
+    { 0x8F3C1E6A, 0, 0, InputMethodType::SOGOU,     "Sogou Pinyin v11" },
+    { 0x1A7D4B9E, 0, 0, InputMethodType::SOGOU,     "Sogou Pinyin v12" },
+
+    // Sogou Cangjie (搜狗五笔)
+    { 0xE9C5A2B1, 0, 0, InputMethodType::SOGOU,     "Sogou Cangjie" },
+    { 0x3F8D6C0E, 0, 0, InputMethodType::SOGOU,     "Sogou Cangjie v2" },
+    { 0xC2A7F4D9, 0, 0, InputMethodType::SOGOU,     "Sogou Cangjie v3" },
+
+    // Sogou Wubi (搜狗五笔)
+    { 0x7E3B1D8F, 0, 0, InputMethodType::SOGOU,     "Sogou Wubi" },
+    { 0x9A1C5E3B, 0, 0, InputMethodType::SOGOU,     "Sogou Wubi v2" },
 
     // Tencent QQ Pinyin (QQ拼音)
     { 0x3BE8A3F2, 0, 0, InputMethodType::PINYIN,    "QQ Pinyin" },
@@ -151,13 +169,17 @@ InputMethodType detectInputMethodTypeFromLayoutName(const wchar_t* klName, LANGI
     // Structured pattern matches — ordered by specificity
     struct PatternMatch { const char* pattern; InputMethodType type; };
     static const PatternMatch PATTERNS[] = {
+        // Sogou IME (搜狗拼音/五笔/仓颉) — specific type, must match before generic Pinyin
+        {"Sogou",   InputMethodType::SOGOU},
+        {"Sougou",  InputMethodType::SOGOU},  // Alternative spelling
+        {"SG",      InputMethodType::SOGOU},  // Sogou short name
+        {"SGPY",    InputMethodType::SOGOU},
+        {"SogouPY", InputMethodType::SOGOU},
+        {"SogouInput", InputMethodType::SOGOU},
+        {"SogouCJIM", InputMethodType::SOGOU},  // Sogou Cangjie
+        {"SogouWBIM", InputMethodType::SOGOU},  // Sogou Wubi
+
         // Horizontal layout IMEs (Pinyin-based)
-        {"Sogou",   InputMethodType::PINYIN},
-        {"Sougou",  InputMethodType::PINYIN},  // Alternative spelling
-        {"SG",      InputMethodType::PINYIN},  // Sogou short name
-        {"SGPY",    InputMethodType::PINYIN},
-        {"SogouPY", InputMethodType::PINYIN},
-        {"SogouInput", InputMethodType::PINYIN},
         {"QQPY",    InputMethodType::PINYIN},
         {"QQPinyin",InputMethodType::PINYIN},
         {"QQInput", InputMethodType::PINYIN},
@@ -301,19 +323,28 @@ InputMethodType detectInputMethodTypeFromHkl(HKL hkl) {
     }
 
     // Fallback: try to get IME description for unrecognized Chinese IMEs
-    if (type == InputMethodType::OTHER_CHINESE) {
-        // Attempt to get IME description to identify specific variants
+    if (type == InputMethodType::OTHER_CHINESE || type == InputMethodType::PINYIN) {
         wchar_t desc[256] = {0};
         if (ImmGetDescriptionW(hkl, desc, _countof(desc)) > 0) {
             // Check for Microsoft New Zhuyin
             if (wcsstr(desc, L"\u65B0\u6CE8\u97F3") != nullptr || wcsstr(desc, L"New Zhuyin") != nullptr) {
                 return InputMethodType::ZHUYIN;
             }
-            // Check for Sogou Cangjie
-            if (wcsstr(desc, L"\u5109\u8F93") != nullptr || wcsstr(desc, L"Cangjie") != nullptr) {
-                return InputMethodType::CANGJIE;
+            // Check for Sogou Cangjie (搜狗五笔)
+            if ((wcsstr(desc, L"\u5109\u8F93") != nullptr || wcsstr(desc, L"Cangjie") != nullptr) &&
+                (wcsstr(desc, L"Sogou") != nullptr || wcsstr(desc, L"\u641C\u72D7") != nullptr)) {
+                return InputMethodType::SOGOU;
             }
-            // Additional fallbacks for other variants can be added here
+            // Check for Sogou Wubi
+            if ((wcsstr(desc, L"Wubi") != nullptr || wcsstr(desc, L"\u4E94\u7B14") != nullptr) &&
+                (wcsstr(desc, L"Sogou") != nullptr || wcsstr(desc, L"\u641C\u72D7") != nullptr)) {
+                return InputMethodType::SOGOU;
+            }
+            // Check for Sogou Pinyin
+            if (wcsstr(desc, L"Sogou") != nullptr || wcsstr(desc, L"\u641C\u72D7") != nullptr ||
+                wcsstr(desc, L"SoGou") != nullptr) {
+                return InputMethodType::SOGOU;
+            }
         }
     }
 
@@ -329,6 +360,7 @@ const wchar_t* getInputMethodTypeName(InputMethodType type) {
         case InputMethodType::CANGJIE:       return L"Cangjie";
         case InputMethodType::WUBI:          return L"Wubi";
         case InputMethodType::SUCHENG:       return L"Sucheng";
+        case InputMethodType::SOGOU:         return L"Sogou";
         case InputMethodType::OTHER_CHINESE: return L"Other Chinese";
         default:                             return L"Unknown";
     }

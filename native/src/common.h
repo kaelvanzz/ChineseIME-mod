@@ -25,6 +25,7 @@ enum class InputMethodType {
     CANGJIE = 4,
     WUBI = 5,
     SUCHENG = 6,
+    SOGOU = 7,
     OTHER_CHINESE = 99
 };
 

@@ -25,6 +25,7 @@ public class NativeImeBridge {
     public static final int IME_TYPE_CANGJIE = 4;
     public static final int IME_TYPE_WUBI = 5;
     public static final int IME_TYPE_SUCHENG = 6;
+    public static final int IME_TYPE_SOGOU = 7;
     public static final int IME_TYPE_OTHER_CHINESE = 99;
 
     private static NativeLibrary INSTANCE = null;
@@ -237,6 +238,7 @@ public class NativeImeBridge {
             case IME_TYPE_CANGJIE -> InputMode.CANGJIE;
             case IME_TYPE_WUBI -> InputMode.WUBI;
             case IME_TYPE_SUCHENG -> InputMode.SUCHENG;
+            case IME_TYPE_SOGOU -> InputMode.SOGOU;
             default -> InputMode.OTHER;
         };
     }
@@ -249,6 +251,7 @@ public class NativeImeBridge {
             case IME_TYPE_CANGJIE -> "倉";
             case IME_TYPE_WUBI -> "五";
             case IME_TYPE_SUCHENG -> "速";
+            case IME_TYPE_SOGOU -> "搜";
             default -> "?";
         };
     }

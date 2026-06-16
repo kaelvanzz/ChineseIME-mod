@@ -7,6 +7,7 @@ public enum InputMode {
     CANGJIE("仓颉", "Cangjie"),
     SUCHENG("速成", "Cangjie Quick"),
     WUBI("五笔", "Wubi"),
+    SOGOU("搜狗", "Sogou"),
     YUEPIN("粤拼", "Cantonese Pinyin"),
     RIME("中州韵", "RIME"),
     OTHER("其他", "Other");
