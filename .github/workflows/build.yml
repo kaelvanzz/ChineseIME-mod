@@ -29,7 +29,7 @@ jobs:
           if (!(Test-Path "natives/Release")) {
               New-Item -ItemType Directory -Path "natives/Release" -Force
           }
-          Copy-Item "native/build/Release/chineseime_native.dll" "natives/Release/" -Force
+          Copy-Item "native/Release/chineseime_native.dll" "natives/Release/" -Force
 
       - name: Build Mod Jar
         run: ./gradlew build
