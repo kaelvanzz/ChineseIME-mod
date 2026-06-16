@@ -9,15 +9,18 @@ import net.minecraft.client.option.KeyBinding;
 import net.minecraft.client.util.InputUtil;
 import org.lwjgl.glfw.GLFW;
 
+import java.util.List;
+
 public class KeyBindingManager {
     private final ModConfig config;
     private final PlatformIMEManager ime;
     private KeyBinding toggleChinese;
     private KeyBinding toggleScript;
-    private boolean ctrlGPressed = false;
+    private KeyBinding openConfig;
     private boolean ctrlShiftFPressed = false;
     private boolean prevToggleImePressed = false;
     private boolean prevToggleModePressed = false;
+    private boolean prevOpenConfigPressed = false;
 
     public KeyBindingManager(ModConfig config, PlatformIMEManager ime) {
         this.config = config;
@@ -36,6 +39,12 @@ public class KeyBindingManager {
                 "key.chineseime.toggle_script",
                 InputUtil.Type.KEYSYM,
                 -1,
+                cat
+        ));
+        this.openConfig = KeyBindingHelper.registerKeyBinding(new KeyBinding(
+                "key.chineseime.open_config",
+                InputUtil.Type.KEYSYM,
+                GLFW.GLFW_KEY_G,
                 cat
         ));
     }
@@ -61,31 +70,55 @@ public class KeyBindingManager {
         }
 
         if (ctrl && GLFW.glfwGetKey(win, GLFW.GLFW_KEY_G) == GLFW.GLFW_PRESS) {
-            if (!this.ctrlGPressed) {
-                mc.setScreen(new ConfigScreen(mc.currentScreen, this.config));
-                this.ctrlGPressed = true;
+            if (!this.prevOpenConfigPressed) {
+                if (mc.currentScreen instanceof ConfigScreen) {
+                    mc.currentScreen.close();
+                } else {
+                    mc.setScreen(new ConfigScreen(mc.currentScreen, this.config));
+                }
+                this.prevOpenConfigPressed = true;
             }
         } else {
-            this.ctrlGPressed = false;
+            this.prevOpenConfigPressed = false;
         }
 
-        int toggleImeKey = this.config.getToggleImeKey();
-        if (toggleImeKey != -1) {
-            boolean currentToggleImePressed = GLFW.glfwGetKey(win, toggleImeKey) == GLFW.GLFW_PRESS;
-            if (currentToggleImePressed && !this.prevToggleImePressed) {
+        if (this.openConfig.wasPressed()) {
+            if (mc.currentScreen instanceof ConfigScreen) {
+                mc.currentScreen.close();
+            } else {
+                mc.setScreen(new ConfigScreen(mc.currentScreen, this.config));
+            }
+        }
+
+        List<Integer> toggleImeKeys = this.config.getToggleImeKeys();
+        if (!toggleImeKeys.isEmpty()) {
+            boolean allPressed = true;
+            for (int key : toggleImeKeys) {
+                if (GLFW.glfwGetKey(win, key) != GLFW.GLFW_PRESS) {
+                    allPressed = false;
+                    break;
+                }
+            }
+            if (allPressed && !this.prevToggleImePressed) {
                 this.ime.toggleInputMethod();
             }
-            this.prevToggleImePressed = currentToggleImePressed;
+            this.prevToggleImePressed = allPressed;
         }
 
         if (!PlatformIMEManager.getPlatform().equals(PlatformIMEManager.OS.WINDOWS)) {
-            int toggleModeKey = this.config.getToggleChineseModeKey();
-            if (toggleModeKey != -1) {
-                boolean currentToggleModePressed = GLFW.glfwGetKey(win, toggleModeKey) == GLFW.GLFW_PRESS;
-                if (currentToggleModePressed && !this.prevToggleModePressed) {
+            List<Integer> toggleModeKeys = this.config.getToggleChineseModeKeys();
+            if (!toggleModeKeys.isEmpty()) {
+                boolean allPressed = true;
+                for (int key : toggleModeKeys) {
+                    if (GLFW.glfwGetKey(win, key) != GLFW.GLFW_PRESS) {
+                        allPressed = false;
+                        break;
+                    }
+                }
+                if (allPressed && !this.prevToggleModePressed) {
                     this.ime.toggleChineseMode();
                 }
-                this.prevToggleModePressed = currentToggleModePressed;
+                this.prevToggleModePressed = allPressed;
             }
         }
     }

@@ -53,21 +53,29 @@ dependencies {
     implementation("net.java.dev.jna:jna-platform:5.14.0")
 }
 
+val osName = System.getProperty("os.name").lowercase()
+val nativeSourceDir = when {
+    osName.contains("linux") -> "natives/Linux"
+    osName.contains("windows") -> "natives/Windows"
+    osName.contains("mac") -> "natives/macOS"
+    else -> throw GradleException("Unsupported OS: $osName")
+}
+
 tasks.processResources {
     inputs.properties("version" to version)
-    
+
     filesMatching("fabric.mod.json") {
         expand("version" to version)
     }
-    
-    // 复制native DLL文件到JAR中
-    from("natives/Release") {
+
+    from(nativeSourceDir) {
         into("META-INF/natives")
     }
 }
 
 tasks.withType<JavaCompile> {
     options.release.set(21)
+    options.isFork = true
 }
 
 // 发布配置

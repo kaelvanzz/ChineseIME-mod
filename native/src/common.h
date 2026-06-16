@@ -1,14 +1,12 @@
 #pragma once
 
 #include <cstdint>
-#include <atomic>
-#include <mutex>
 #include <string>
 #include <vector>
 
 #ifdef _WIN32
 #ifdef CHINESEIME_EXPORTS
-#define CHINESEIME_API __declspec(dllextspec)
+#define CHINESEIME_API __declspec(dllexport)
 #else
 #define CHINESEIME_API __declspec(dllimport)
 #endif

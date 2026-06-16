@@ -2,87 +2,140 @@ package com.example.chineseime.platform.win32;
 
 import com.example.chineseime.ChineseIMEInitializer;
 import com.example.chineseime.engine.InputMode;
+import com.example.chineseime.hud.CandidateHud;
+import com.example.chineseime.hud.ImeStatusIndicator;
+import net.minecraft.client.MinecraftClient;
+import net.minecraft.client.gui.screen.ChatScreen;
 import java.util.ArrayList;
 import java.util.List;
 
 public class WindowsIMEBridgeNative {
-    private final IMEState state = new IMEState();
     private boolean initialized = false;
+    private CandidateHud candidateHud;
+    private ImeStatusIndicator statusIndicator;
 
-    public WindowsIMEBridgeNative() {
-        ChineseIMEInitializer.LOGGER.info("[ChineseIME] Initializing WindowsIMEBridgeNative");
+    private int prevInputMethodType = -1;
+    private boolean prevChineseMode = false;
+    private boolean prevCapsLock = false;
+    private boolean prevShiftMode = false;
+    private List<String> prevCandidates = new ArrayList<>();
+    private String prevComposition = "";
+    private int tickCounter = 0;
+    private boolean prevHudShown = false;
+    private boolean wasInEnglishMode = false;
+    private int ticksSinceModeSwitch = 0;
+
+    public WindowsIMEBridgeNative(CandidateHud candidateHud) {
+        this.candidateHud = candidateHud;
+        ChineseIMEInitializer.LOGGER.info("[ChineseIME] Initializing WindowsIMEBridgeNative (polling mode)");
     }
 
-public boolean initialize() {
-    NativeImeBridge.getInstance();
-
-    if (!NativeImeBridge.isAvailable()) {
-        ChineseIMEInitializer.LOGGER.warn("[ChineseIME] Native library not available");
-        return false;
+    public void setStatusIndicator(ImeStatusIndicator indicator) {
+        this.statusIndicator = indicator;
     }
 
-    ChineseIMEInitializer.LOGGER.info("[ChineseIME] DLL available, starting TSF listen...");
+    public boolean initialize() {
+        NativeImeBridge.getInstance();
 
-    NativeImeBridge.startListening(0L);
-    int tsfResult = NativeImeBridge.startTsfListening();
-    ChineseIMEInitializer.LOGGER.info("[ChineseIME] TSF listen result: {}", tsfResult);
-
-    initialized = true;
-
-    updateState();
-    ChineseIMEInitializer.LOGGER.info("[ChineseIME] WindowsIMEBridgeNative initialized successfully");
-    return true;
-}
-
-public void update() {
-    if (!initialized) return;
-
-    NativeImeBridge.refreshImeState();
-
-    state.imeOpen = NativeImeBridge.getImeOpenStatus();
-    state.chineseMode = NativeImeBridge.getTsfChineseMode();
-    state.capsLockOn = NativeImeBridge.getCapsLockState();
-    state.inShiftMode = NativeImeBridge.getShiftMode();
-
-    ChineseIMEInitializer.LOGGER.debug("[ChineseIME] DLL: imeOpen={}, chineseMode={}, capsLock={}, shiftMode={}",
-        state.imeOpen, state.chineseMode, state.capsLockOn, state.inShiftMode);
-
-        String comp = NativeImeBridge.getCompositionString();
-        List<String> cands = NativeImeBridge.getCandidates();
-        int selIndex = NativeImeBridge.getSelectedCandidateIndex();
-
-        if (!comp.isEmpty()) {
-            state.composition = comp;
-            state.candidates = cands;
-            state.selectedIndex = selIndex;
-        } else if (comp.isEmpty() && !state.composition.isEmpty()) {
-            state.composition = "";
-            state.candidates.clear();
-            state.selectedIndex = 0;
+        if (!NativeImeBridge.isAvailable()) {
+            ChineseIMEInitializer.LOGGER.warn("[ChineseIME] Native library not available");
+            return false;
         }
+
+        NativeImeBridge.startListening(0L);
+        int tsfResult = NativeImeBridge.startTsfListening();
+        ChineseIMEInitializer.LOGGER.info("[ChineseIME] TSF listen result: {}", tsfResult);
+
+        initialized = true;
+        ChineseIMEInitializer.LOGGER.info("[ChineseIME] WindowsIMEBridgeNative initialized (polling mode)");
+        return true;
+    }
+
+    public void update() {
+        if (!initialized) return;
+
+        NativeImeBridge.refreshImeState();
 
         int inputMethodType = NativeImeBridge.getInputMethodType();
-        InputMode newMode = NativeImeBridge.getInputMethodTypeAsEnum(inputMethodType);
-        String newDesc = NativeImeBridge.getInputMethodTypeString(inputMethodType);
+        InputMode currentMode = NativeImeBridge.getInputMethodTypeAsEnum(inputMethodType);
+        boolean chineseMode = NativeImeBridge.isChineseMode();
+        boolean capsLockOn = NativeImeBridge.getCapsLockState();
+        boolean imeOpen = NativeImeBridge.getImeOpenStatus();
+        boolean inShiftMode = NativeImeBridge.getShiftMode();
 
-        if (state.detectedInputMode != newMode || !newDesc.equals(state.imeDescription)) {
-            state.detectedInputMode = newMode;
-            state.imeDescription = newDesc;
-            state.layoutChanged = true;
+        String composition = NativeImeBridge.getCompositionString();
+        List<String> candidates = NativeImeBridge.getCandidates();
+        int selectedIndex = NativeImeBridge.getSelectedCandidateIndex();
+
+        boolean stateChanged = prevInputMethodType != inputMethodType
+            || prevChineseMode != chineseMode
+            || prevCapsLock != capsLockOn
+            || prevShiftMode != inShiftMode;
+
+        if (!prevChineseMode && chineseMode) {
+            wasInEnglishMode = true;
+            ticksSinceModeSwitch = 0;
+        }
+        if (wasInEnglishMode) {
+            ticksSinceModeSwitch++;
         }
 
-        if (NativeImeBridge.hasTsfLayoutChanged()) {
-            state.layoutChanged = true;
+        prevInputMethodType = inputMethodType;
+        prevChineseMode = chineseMode;
+        prevCapsLock = capsLockOn;
+        prevShiftMode = inShiftMode;
+
+        boolean inChat = isChatScreenOpen();
+        boolean candidatesChanged = !prevCandidates.equals(candidates) || !prevComposition.equals(composition);
+        if (candidatesChanged) {
+            prevCandidates = new ArrayList<>(candidates);
+            prevComposition = composition;
+
+            if (candidateHud != null && inChat) {
+                if (!candidates.isEmpty()) {
+                    wasInEnglishMode = false;
+                    candidateHud.updateCandidatesKeepSelection(
+                        candidates, composition, selectedIndex, candidateHud.getPage());
+                } else if (!composition.isEmpty()) {
+                    if (wasInEnglishMode && ticksSinceModeSwitch < 10) {
+                    } else {
+                        wasInEnglishMode = false;
+                        List<String> fallback = com.example.chineseime.engine.PinyinDictionary.getSuggestions(composition);
+                        if (!fallback.isEmpty()) {
+                            candidateHud.updateCandidatesKeepSelection(fallback, composition, 0, 0);
+                        } else {
+                            candidateHud.updateCandidatesKeepSelection(new ArrayList<>(), composition, 0, 0);
+                        }
+                    }
+                } else {
+                    candidateHud.clearInput();
+                }
+            }
         }
 
-        state.wasInChineseMode = state.chineseMode;
+        tickCounter++;
+        if (tickCounter % 600 == 0 || (tickCounter % 60 == 0 && !candidates.isEmpty())) {
+            ChineseIMEInitializer.LOGGER.info("[ChineseIME] Poll: IME={}({}), CMode={}, Caps={}, ShiftM={}, ImeOpen={}, CandCnt={}, Comp='{}'",
+                currentMode, inputMethodType, chineseMode, capsLockOn, inShiftMode, imeOpen,
+                candidates.size(), composition);
+        }
+
+        boolean hudShown = candidateHud != null && candidateHud.isVisible();
+        if (hudShown && statusIndicator != null) {
+            statusIndicator.hide();
+        } else if (statusIndicator != null) {
+            if (stateChanged) {
+                statusIndicator.update(chineseMode, currentMode, capsLockOn, inShiftMode);
+            } else if (prevHudShown) {
+                statusIndicator.show();
+            }
+        }
+        prevHudShown = hudShown;
     }
 
-    private void updateState() {
-        state.detectedInputMode = NativeImeBridge.getInputMethodTypeAsEnum();
-        state.imeDescription = NativeImeBridge.getInputMethodTypeString();
-        state.chineseMode = NativeImeBridge.isChineseMode();
-        state.imeOpen = NativeImeBridge.getImeOpenStatus();
+    private static boolean isChatScreenOpen() {
+        MinecraftClient mc = MinecraftClient.getInstance();
+        return mc != null && mc.currentScreen instanceof ChatScreen;
     }
 
     public void shutdown() {
@@ -93,72 +146,16 @@ public void update() {
         }
     }
 
-    public boolean isImeOpen() {
-        return state.imeOpen;
-    }
-
-    public boolean isChineseMode() {
-        return state.chineseMode;
-    }
-
-    public String getComposition() {
-        return state.composition;
-    }
-
-    public List<String> getCandidates() {
-        return state.candidates;
-    }
-
-    public int getSelectedIndex() {
-        return state.selectedIndex;
-    }
-
-    public boolean hasCandidates() {
-        return !state.candidates.isEmpty();
-    }
-
-    public boolean hasComposition() {
-        return state.composition != null && !state.composition.isEmpty();
-    }
-
+    public boolean isImeOpen() { return NativeImeBridge.getImeOpenStatus(); }
+    public boolean isChineseMode() { return NativeImeBridge.isChineseMode(); }
     public boolean isCapsLockOn() {
-        return state.capsLockOn;
+        boolean raw = NativeImeBridge.getCapsLockState();
+        if (tickCounter % 20 == 0) {
+            ChineseIMEInitializer.LOGGER.info("[ChineseIME] CapsLock raw JNA call = {}", raw);
+        }
+        return raw;
     }
-
-    public boolean isInShiftMode() {
-        return state.inShiftMode;
-    }
-
-    public InputMode getDetectedInputMode() {
-        return state.detectedInputMode;
-    }
-
-    public String getImeDescription() {
-        return state.imeDescription;
-    }
-
-    public boolean hasLayoutChanged() {
-        boolean changed = state.layoutChanged;
-        state.layoutChanged = false;
-        return changed;
-    }
-
-    public void resetShiftMode() {
-        state.wasInChineseMode = state.chineseMode;
-        state.inShiftMode = false;
-    }
-
-    private static class IMEState {
-        boolean imeOpen = false;
-        boolean chineseMode = false;
-        String composition = "";
-        List<String> candidates = new ArrayList<>();
-        int selectedIndex = 0;
-        boolean layoutChanged = false;
-        InputMode detectedInputMode = InputMode.PINYIN;
-        String imeDescription = "";
-        boolean capsLockOn = false;
-        boolean inShiftMode = false;
-        boolean wasInChineseMode = false;
-    }
+    public boolean isInShiftMode() { return NativeImeBridge.getShiftMode(); }
+    public InputMode getDetectedInputMode() { return NativeImeBridge.getInputMethodTypeAsEnum(); }
+    public boolean hasLayoutChanged() { return false; }
 }

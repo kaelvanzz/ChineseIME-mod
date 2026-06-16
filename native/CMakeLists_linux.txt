@@ -1,0 +1,53 @@
+cmake_minimum_required(VERSION 3.15)
+project(ChineseIME_Native_Linux VERSION 1.1.0 LANGUAGES CXX)
+
+set(CMAKE_CXX_STANDARD 17)
+set(CMAKE_CXX_STANDARD_REQUIRED ON)
+
+set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -Wall -Wextra")
+set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -DCHINESEIME_LINUX")
+
+if(NOT CMAKE_BUILD_TYPE)
+    set(CMAKE_BUILD_TYPE Release)
+endif()
+
+include(FindPkgConfig)
+
+pkg_check_modules(DBUS REQUIRED dbus-1)
+pkg_check_modules(GTK3 gtk+-3.0)
+
+add_library(chineseime_native_linux SHARED
+    src/linux/linux_ime_bridge.cpp
+    src/linux/fcitx_dbus_monitor.cpp
+    src/linux/rime_monitor.cpp
+    src/linux/common_linux.cpp
+)
+
+target_include_directories(chineseime_native_linux PRIVATE
+    ${CMAKE_CURRENT_SOURCE_DIR}/src
+    ${CMAKE_CURRENT_SOURCE_DIR}/src/linux
+    ${DBUS_INCLUDE_DIRS}
+    ${GTK3_INCLUDE_DIRS}
+)
+
+target_link_libraries(chineseime_native_linux PRIVATE
+    ${DBUS_LIBRARIES}
+    ${GTK3_LIBRARIES}
+    pthread
+    dl
+    stdc++
+)
+
+target_compile_definitions(chineseime_native_linux PRIVATE
+    CHINESEIME_EXPORTS
+    LINUX
+    _GLIBCXX_USE_CXX11_ABI=1
+)
+
+set_target_properties(chineseime_native_linux PROPERTIES
+    RUNTIME_OUTPUT_DIRECTORY ${CMAKE_SOURCE_DIR}/../natives/Linux
+    LIBRARY_OUTPUT_DIRECTORY ${CMAKE_SOURCE_DIR}/../natives/Linux
+    ARCHIVE_OUTPUT_DIRECTORY ${CMAKE_SOURCE_DIR}/../natives/Linux
+    PREFIX ""
+    SUFFIX ".so"
+)

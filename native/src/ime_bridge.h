@@ -22,7 +22,8 @@ CHINESEIME_API int IsListening(void);
 // State query (legacy WinEvent hook)
 CHINESEIME_API int IsChineseMode(void);
 CHINESEIME_API int HasLayoutChanged(void);
-CHINESEIME_API long GetKeyboardLayoutHKL(void);
+// CHINESEIME_API must not be used here because the function uses __declspec(dllexport) directly
+long GetKeyboardLayoutHKL(void);
 CHINESEIME_API const char* GetDllVersion(void);
 
 // TSF-based IME data (new API)
@@ -51,11 +52,28 @@ CHINESEIME_API int GetInputMethodType(void);
 // Force refresh (call from Java poll loop)
 CHINESEIME_API void RefreshImeState(void);
 
+// Poll individual key state (for real-time Shift detection)
+CHINESEIME_API int GetKeyboardStateForPolling(int vKey);
+
 // Memory management
 CHINESEIME_API void FreeBuffer(void* ptr);
 
 // Callback registration
 CHINESEIME_API void SetCallbacks(void* candidateUpdate, void* layoutChange, void* modeChange, void* keyboardState);
+
+// Event-driven API (WndProc hook for IME events)
+CHINESEIME_API void HookWindowProc(void* hwnd);
+CHINESEIME_API void UnhookWindowProc(void);
+CHINESEIME_API void RefreshCandidates(void);
+CHINESEIME_API int IsWindowHooked(void);
+
+// Event callbacks registration (for event-driven mode)
+CHINESEIME_API void SetEventCallbacks(
+    void* preeditCallback,
+    void* commitCallback,
+    void* candidateCallback,
+    void* imeChangeCallback,
+    void* keyboardCallback);
 
 #ifdef __cplusplus
 }

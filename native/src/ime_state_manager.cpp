@@ -13,6 +13,7 @@ InputMethodType detectInputMethodTypeFromImeId(WORD imeId, LANGID langId) {
         return InputMethodType::ENGLISH;
     }
     switch (imeId) {
+    case 0x0000: return InputMethodType::PINYIN;
     case 0x0001: case 0x0010: case 0xE010: case 0xE020: return InputMethodType::PINYIN;
     case 0x0002: case 0xE011: return InputMethodType::WUBI;
     case 0x0003: case 0xE001: return InputMethodType::ZHUYIN;
@@ -25,6 +26,10 @@ InputMethodType detectInputMethodTypeFromImeId(WORD imeId, LANGID langId) {
 void ImeStateManager::updateInputMethod(InputMethodType type) {
     std::lock_guard<std::mutex> lock(mutex_);
     if (state_.inputMethodType != type) {
+        char dbg[128];
+        sprintf_s(dbg, "[ChineseIME] updateInputMethod: %d -> %d\n",
+            (int)state_.inputMethodType, (int)type);
+        OutputDebugStringA(dbg);
         state_.inputMethodType = type;
         state_.layoutChangeCount++;
         changes_.inputMethodChanged = true;
@@ -74,11 +79,15 @@ void ImeStateManager::updateComposition(const std::wstring& comp) {
 
 void ImeStateManager::updateCandidates(const std::wstring& comp, const std::vector<std::wstring>& cands, int selectedIndex) {
     std::lock_guard<std::mutex> lock(mutex_);
-    state_.composition = comp;
-    state_.candidates = cands;
-    state_.selectedIndex = selectedIndex;
-    changes_.compositionChanged = true;
-    changes_.candidatesChanged = true;
+    if (state_.composition != comp) {
+        state_.composition = comp;
+        changes_.compositionChanged = true;
+    }
+    if (state_.candidates != cands || state_.selectedIndex != selectedIndex) {
+        state_.candidates = cands;
+        state_.selectedIndex = selectedIndex;
+        changes_.candidatesChanged = true;
+    }
 }
 
 void ImeStateManager::updateKeyboardState(bool capsLock, bool shiftPressed) {
@@ -117,6 +126,25 @@ bool ImeStateManager::checkLayoutChanged() {
         return true;
     }
     return false;
+}
+
+bool ImeStateManager::isChineseInputMethod() const {
+    std::lock_guard<std::mutex> lock(mutex_);
+    auto type = state_.inputMethodType;
+    return type != InputMethodType::ENGLISH && type != InputMethodType::UNKNOWN;
+}
+
+long ImeStateManager::getKeyboardLayout() const {
+    std::lock_guard<std::mutex> lock(mutex_);
+    return state_.hkl;
+}
+
+void ImeStateManager::updateHklState(long hkl) {
+    std::lock_guard<std::mutex> lock(mutex_);
+    if (state_.hkl != hkl) {
+        state_.hkl = hkl;
+        state_.layoutChangeCount++;
+    }
 }
 
 void ImeStateManager::clearLayoutChanged() {

@@ -12,6 +12,7 @@ src/ime_state_manager.cpp
 src/jni_callback.cpp
 src/tsf_monitor.cpp
 src/imm32_monitor.cpp
+src/win_event_bridge.cpp
 )
 
 # Include directories
@@ -37,7 +38,7 @@ endif()
 
 # Output to natives folder
 set_target_properties(chineseime_native PROPERTIES
-    RUNTIME_OUTPUT_DIRECTORY ${CMAKE_SOURCE_DIR}/../natives
-    LIBRARY_OUTPUT_DIRECTORY ${CMAKE_SOURCE_DIR}/../natives
-    ARCHIVE_OUTPUT_DIRECTORY ${CMAKE_SOURCE_DIR}/../natives
+    RUNTIME_OUTPUT_DIRECTORY ${CMAKE_SOURCE_DIR}/../natives/Windows
+    LIBRARY_OUTPUT_DIRECTORY ${CMAKE_SOURCE_DIR}/../natives/Windows
+    ARCHIVE_OUTPUT_DIRECTORY ${CMAKE_SOURCE_DIR}/../natives/Windows
 )

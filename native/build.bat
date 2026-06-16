@@ -65,13 +65,13 @@ cd ..
 
 echo.
 echo Build complete!
-echo DLL location: natives\chineseime_native.dll
+echo DLL location: natives\Windows\chineseime_native.dll
 echo.
 echo Copy the DLL to your Minecraft mods folder or add to java.library.path
 echo.
 
 REM 检查DLL是否生成
-if exist "natives\chineseime_native.dll" (
+if exist "natives\Windows\chineseime_native.dll" (
     echo SUCCESS: chineseime_native.dll created successfully.
 ) else (
     echo WARNING: DLL not found in expected location.
