@@ -7,14 +7,10 @@ import net.minecraft.client.gui.DrawContext;
 
 public class ImeStatusIndicator {
     private boolean chineseMode = true;
-    private InputMode inputMode;
-    private boolean capsLockOn;
-    private boolean inShiftMode;
-    private boolean visible;
-    private boolean lastChineseMode;
-    private InputMode lastInputMode;
-    private boolean lastCapsLockOn;
-    private boolean inChatScreen;
+    private InputMode inputMode = InputMode.PINYIN;
+    private boolean capsLockOn = false;
+    private boolean inShiftMode = false;
+    private boolean visible = false;
 
     private static final int BG_NORMAL = 0x99000000;
     private static final int BG_CAPS = 0x994466AA;
@@ -22,38 +18,56 @@ public class ImeStatusIndicator {
     private static final int TEXT_COLOR = 0xFFFFFFFF;
     private static final int SHIFT_INDICATOR = 0xFFFFAA00;
 
-    private static final int SIZE = 22;
-    private static final int SHIFT_INDICATOR_SIZE = 8;
+    private static final int SIZE_1080P = 40;
+    private static final int SHIFT_INDICATOR_SIZE_1080P = 8;
 
     public ImeStatusIndicator() {
         this.inputMode = InputMode.PINYIN;
         this.capsLockOn = false;
         this.inShiftMode = false;
         this.visible = false;
-        this.lastChineseMode = true;
-        this.lastInputMode = InputMode.PINYIN;
-        this.lastCapsLockOn = false;
-        this.inChatScreen = false;
     }
 
-    public void setInChatScreen(boolean inChatScreen) {
-        this.inChatScreen = inChatScreen;
-    }
+    public void update(boolean chineseMode, InputMode inputMode, boolean capsLockOn, boolean inShiftMode) {
+        InputMode safeInputMode = (inputMode != null) ? inputMode : InputMode.OTHER;
 
-    public void update(boolean chineseMode, InputMode inputMode, boolean capsLockOn, boolean inShiftMode, boolean isTyping, boolean layoutChanged) {
+        boolean changed = this.chineseMode != chineseMode
+            || this.inputMode != safeInputMode
+            || this.capsLockOn != capsLockOn
+            || this.inShiftMode != inShiftMode;
+
         this.chineseMode = chineseMode;
-        this.inputMode = inputMode;
+        this.inputMode = safeInputMode;
         this.capsLockOn = capsLockOn;
         this.inShiftMode = inShiftMode;
+        this.visible = true;
 
-        this.visible = this.inChatScreen || true;
-        this.lastChineseMode = chineseMode;
-        this.lastInputMode = inputMode;
-        this.lastCapsLockOn = capsLockOn;
+        if (changed) {
+            com.example.chineseime.ChineseIMEInitializer.LOGGER.info(
+                "[ChineseIME] Indicator: IME={}, CapsLock={}, ShiftMode={}, ChineseMode={}",
+                getDisplayText(), capsLockOn, inShiftMode, chineseMode);
+        }
+    }
+
+    public void setInChatScreen(boolean inChat) {
+        if (inChat) this.visible = true;
     }
 
     public void hide() {
         this.visible = false;
+    }
+
+    public void show() {
+        this.visible = true;
+    }
+
+    public void forceUpdate(boolean chineseMode, InputMode inputMode, boolean capsLockOn, boolean inShiftMode) {
+        InputMode safeInputMode = (inputMode != null) ? inputMode : InputMode.OTHER;
+        this.chineseMode = chineseMode;
+        this.inputMode = safeInputMode;
+        this.capsLockOn = capsLockOn;
+        this.inShiftMode = inShiftMode;
+        this.visible = true;
     }
 
     private String getDisplayText() {
@@ -61,18 +75,13 @@ public class ImeStatusIndicator {
             case LATIN -> "En";
             case PINYIN -> "拼";
             case ZHUYIN -> "注";
-            case CANGJIE -> "仓";
+            case CANGJIE -> "倉";
             case SUCHENG -> "速";
             case WUBI -> "五";
+            case OTHER -> "中";
+            case YUEPIN -> "粤";
             default -> "?";
         };
-    }
-
-    private int getShiftIndicatorSize() {
-        MinecraftClient mc = MinecraftClient.getInstance();
-        if (mc == null) return SHIFT_INDICATOR_SIZE;
-        int screenHeight = mc.getWindow().getHeight();
-        return Math.round(8.0f * screenHeight / 1080.0f);
     }
 
     public void render(DrawContext ctx) {
@@ -82,47 +91,46 @@ public class ImeStatusIndicator {
         if (mc == null) return;
 
         TextRenderer font = mc.textRenderer;
-        int screenHeight = mc.getWindow().getHeight();
+        int scaledW = ctx.getScaledWindowWidth();
+        int scaledH = ctx.getScaledWindowHeight();
+        int physicalW = mc.getWindow().getWidth();
+        float scale = physicalW > 0 ? (float) physicalW / (float) scaledW : 2.0f;
 
-        int x = 4;
-        int y = screenHeight - SIZE - 48;
+        int size = (int)(SIZE_1080P / scale);
+        int shiftSize = (int)(SHIFT_INDICATOR_SIZE_1080P / scale);
+        int margin = (int)(8 / scale);
+        int chatInputTop = scaledH - 22 - 14;
+        int x = margin;
+        int y = chatInputTop - 2 - size;
 
-        int bgColor = (!this.inShiftMode && this.capsLockOn) ? BG_CAPS : BG_NORMAL;
+        int bgColor = this.capsLockOn ? BG_CAPS : BG_NORMAL;
 
-        ctx.fill(x, y, x + SIZE, y + SIZE, bgColor);
-        ctx.drawBorder(x, y, SIZE, SIZE, BORDER_COLOR);
+        ctx.fill(x, y, x + size, y + size, bgColor);
+        ctx.drawBorder(x, y, size, size, BORDER_COLOR);
 
         String text = this.getDisplayText();
         int textWidth = font.getWidth(text);
-        int textX = x + (SIZE - textWidth) / 2;
-        int textY = y + (SIZE - 8) / 2;
-        ctx.drawText(font, text, textX, textY, TEXT_COLOR, false);
+        float textX = x + (size - textWidth) / 2f;
+        float textY = y + (size - font.fontHeight) / 2f;
+        ctx.getMatrices().push();
+        ctx.getMatrices().translate(textX, textY, 0);
+        ctx.drawText(font, text, 0, 0, TEXT_COLOR, false);
+        ctx.getMatrices().pop();
 
         if (this.inShiftMode) {
-            int shiftIndicatorSize = getShiftIndicatorSize();
-            int shiftX = x + SIZE - shiftIndicatorSize - 1;
+            int shiftX = x + size - shiftSize - 1;
             int shiftY = y + 1;
-            ctx.fill(shiftX, shiftY, shiftX + shiftIndicatorSize, shiftY + shiftIndicatorSize, SHIFT_INDICATOR);
+            ctx.fill(shiftX, shiftY, shiftX + shiftSize, shiftY + shiftSize, SHIFT_INDICATOR);
         }
     }
 
-    public boolean isVisible() {
-        return this.visible;
-    }
+    public boolean isVisible() { return this.visible; }
+    public boolean isChineseMode() { return this.chineseMode; }
+    public InputMode getInputMode() { return this.inputMode; }
+    public boolean isInShiftMode() { return this.inShiftMode; }
+    public boolean isCapsLockOn() { return this.capsLockOn; }
 
-    public boolean isChineseMode() {
-        return this.chineseMode;
-    }
-
-    public InputMode getInputMode() {
-        return this.inputMode;
-    }
-
-    public boolean isInShiftMode() {
-        return this.inShiftMode;
-    }
-
-    public static int getHeight() {
-        return SIZE;
+    public static int getHeight(float scale) {
+        return (int)(SIZE_1080P / scale);
     }
 }

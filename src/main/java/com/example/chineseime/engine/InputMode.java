@@ -11,28 +11,23 @@ public enum InputMode {
     RIME("中州韵", "RIME"),
     OTHER("其他", "Other");
 
-   private final String chineseName;
-   private final String englishName;
+    private final String chineseName;
+    private final String englishName;
 
-   private InputMode(String chineseName, String englishName) {
-      this.chineseName = chineseName;
-      this.englishName = englishName;
-   }
+    private InputMode(String chineseName, String englishName) {
+        this.chineseName = chineseName;
+        this.englishName = englishName;
+    }
 
-   public String getChineseName() {
-      return this.chineseName;
-   }
+    public String getChineseName() {
+        return this.chineseName;
+    }
 
-   public String getEnglishName() {
-      return this.englishName;
-   }
+    public String getEnglishName() {
+        return this.englishName;
+    }
 
-   public String getDisplayName() {
-      return this.chineseName + " (" + this.englishName + ")";
-   }
-
-   // $FF: synthetic method
-   private static InputMode[] $values() {
-      return new InputMode[]{LATIN, PINYIN, ZHUYIN, CANGJIE, SUCHENG, WUBI, YUEPIN, RIME};
-   }
+    public String getDisplayName() {
+        return this.chineseName + " (" + this.englishName + ")";
+    }
 }

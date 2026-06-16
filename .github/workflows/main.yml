@@ -1,0 +1,30 @@
+name: Build
+
+on:
+  push:
+    branches: [ "main", "master" ]
+  pull_request:
+    branches: [ "main", "master" ]
+
+jobs:
+  build:
+    runs-on: windows-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up JDK 21
+        uses: actions/setup-java@v4
+        with:
+          java-version: '21'
+          distribution: 'temurin'
+
+      - name: Build Native DLL
+        run: |
+          cd native
+          cmake -B build
+          cmake --build build --config Release
+          cd ..
+
+      - name: Build JAR
+        run: ./gradlew build

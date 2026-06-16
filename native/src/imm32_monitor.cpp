@@ -21,6 +21,8 @@
 namespace chineseime {
 
 static Imm32Monitor* g_imm32Monitor = nullptr;
+static std::atomic<bool> g_imm32Running{false};
+static std::thread g_imm32PollThread;
 
 Imm32Monitor::Imm32Monitor() {
     DEBUG_LOG_SIMPLE(L"[ChineseIME] Imm32Monitor created\n");
@@ -58,6 +60,17 @@ bool Imm32Monitor::initialize() {
     g_imm32Monitor = this;
     isInitialized_ = true;
     DEBUG_LOG_SIMPLE(L"[ChineseIME] Imm32Monitor initialized\n");
+
+    // Start a background message processing thread for WM_IME_NOTIFY
+    std::thread([] {
+        DEBUG_LOG_SIMPLE(L"[ChineseIME] Imm32Monitor message thread started\n");
+        MSG msg;
+        while (GetMessageW(&msg, nullptr, 0, 0)) {
+            TranslateMessage(&msg);
+            DispatchMessageW(&msg);
+        }
+        DEBUG_LOG_SIMPLE(L"[ChineseIME] Imm32Monitor message thread exited\n");
+    }).detach();
     return true;
 }
 
@@ -80,10 +93,7 @@ void Imm32Monitor::update() {
 
     HIMC himc = ImmGetContext(fgWnd);
     if (!himc) {
-        if (lastHimc_) {
-            ImeStateManager::get().updateCandidates(L"", {}, 0);
-            lastHimc_ = nullptr;
-        }
+        ImeStateManager::get().updateCandidates(L"", {}, 0);
         return;
     }
 
@@ -96,7 +106,6 @@ void Imm32Monitor::update() {
     }
 
     ImmReleaseContext(fgWnd, himc);
-    lastHimc_ = himc;
 }
 
 void Imm32Monitor::processComposition(HWND hwnd, HIMC himc) {
@@ -104,11 +113,11 @@ void Imm32Monitor::processComposition(HWND hwnd, HIMC himc) {
 
     LONG compLen = ImmGetCompositionString(himc, GCS_COMPREADSTR, nullptr, 0);
     if (compLen > 0) {
-        wchar_t* compBuf = new wchar_t[compLen + 1];
-        ImmGetCompositionString(himc, GCS_COMPREADSTR, compBuf, compLen);
-        compBuf[compLen] = 0;
-        composition = compBuf;
-        delete[] compBuf;
+        int wcharLen = compLen / sizeof(wchar_t);
+        std::vector<wchar_t> compBuf(wcharLen + 1);
+        ImmGetCompositionString(himc, GCS_COMPREADSTR, compBuf.data(), compLen);
+        compBuf[wcharLen] = 0;
+        composition.assign(compBuf.data(), wcharLen);
     }
 
     ImeStateManager::get().updateComposition(composition);
@@ -120,16 +129,16 @@ void Imm32Monitor::processCandidate(HWND hwnd, HIMC himc) {
 
     size_t bufSize = ImmGetCandidateList(himc, 0, nullptr, 0);
     if (bufSize > 0) {
-        CANDIDATELIST* candList = (CANDIDATELIST*)new char[bufSize];
+        std::vector<char> candBuf(bufSize);
+        CANDIDATELIST* candList = reinterpret_cast<CANDIDATELIST*>(candBuf.data());
         ImmGetCandidateList(himc, 0, candList, bufSize);
         DWORD count = candList->dwCount;
         selectedIndex = candList->dwSelection;
         if (count > 10) count = 10;
         for (DWORD j = 0; j < count; j++) {
-            wchar_t* pStr = (wchar_t*)((char*)candList + candList->dwOffset[j]);
+            wchar_t* pStr = (wchar_t*)(candBuf.data() + candList->dwOffset[j]);
             candidates.push_back(pStr);
         }
-        delete[] (char*)candList;
 
         std::wstring comp;
         auto state = ImeStateManager::get().getSnapshot();
@@ -162,7 +171,7 @@ LRESULT CALLBACK Imm32Monitor::wndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARA
             }
         }
     } else if (msg == WM_IME_NOTIFY) {
-        if (wParam == IMN_CHANGECANDIDATE) {
+        if (wParam == IMN_CHANGECANDIDATE || wParam == IMN_OPENCANDIDATE || wParam == IMN_CLOSECANDIDATE) {
             if (g_imm32Monitor) {
                 HWND fgWnd = GetForegroundWindow();
                 if (fgWnd) {
@@ -178,6 +187,19 @@ LRESULT CALLBACK Imm32Monitor::wndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARA
         if (g_imm32Monitor) {
             HKL hkl = reinterpret_cast<HKL>(lParam);
             g_imm32Monitor->detectInputMethodType(hkl);
+        }
+    } else if (msg == WM_IME_STARTCOMPOSITION || msg == WM_IME_ENDCOMPOSITION) {
+        // Composition lifecycle events
+        if (g_imm32Monitor) {
+            HWND fgWnd = GetForegroundWindow();
+            if (fgWnd) {
+                HIMC himc = ImmGetContext(fgWnd);
+                if (himc) {
+                    g_imm32Monitor->processComposition(fgWnd, himc);
+                    g_imm32Monitor->processCandidate(fgWnd, himc);
+                    ImmReleaseContext(fgWnd, himc);
+                }
+            }
         }
     }
 

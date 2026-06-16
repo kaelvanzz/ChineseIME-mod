@@ -4,6 +4,8 @@
 #include <windows.h>
 #include <string>
 #include <vector>
+#include <thread>
+#include <atomic>
 
 namespace chineseime {
 
@@ -27,7 +29,8 @@ private:
     HWND parentWnd_ = nullptr;
     bool isInitialized_ = false;
     bool isTracking_ = false;
-    HIMC lastHimc_ = nullptr;
+    std::thread msgThread_;
+    std::atomic<bool> msgRunning_{false};
 };
 
 } // namespace chineseime

@@ -12,6 +12,7 @@ src/ime_state_manager.cpp
 src/jni_callback.cpp
 src/tsf_monitor.cpp
 src/imm32_monitor.cpp
+src/win_event_bridge.cpp
 )
 
 # Include directories
