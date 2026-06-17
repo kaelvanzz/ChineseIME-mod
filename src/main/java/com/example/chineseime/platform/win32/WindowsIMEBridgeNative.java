@@ -1,6 +1,7 @@
 package com.example.chineseime.platform.win32;
 
 import com.example.chineseime.ChineseIMEInitializer;
+import com.example.chineseime.engine.CangjieDictionary;
 import com.example.chineseime.engine.InputMode;
 import com.example.chineseime.hud.CandidateHud;
 import com.example.chineseime.hud.ImeStatusIndicator;
@@ -112,6 +113,7 @@ public class WindowsIMEBridgeNative {
                 }
             }
         }
+    }
 
         tickCounter++;
         if (tickCounter % 600 == 0 || (tickCounter % 60 == 0 && !candidates.isEmpty())) {
@@ -138,11 +140,10 @@ public class WindowsIMEBridgeNative {
         return mc != null && mc.currentScreen instanceof ChatScreen;
     }
 
-    public void shutdown() {
-        if (initialized) {
-            NativeImeBridge.stopTsfListening();
-            NativeImeBridge.stopListening();
-            initialized = false;
+    public void unhookWindow() {
+        if (hooked) {
+            NativeImeBridge.unhookWindowProc();
+            hooked = false;
         }
     }
 

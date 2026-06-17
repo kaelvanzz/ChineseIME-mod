@@ -1,0 +1,40 @@
+name: Build-windows
+
+on:
+  push:
+    branches: [ "main", "master", "windows" ]
+  pull_request:
+    branches: [ "main", "master", "windows" ]
+
+jobs:
+  build:
+    runs-on: windows-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up JDK 21
+        uses: actions/setup-java@v4
+        with:
+          java-version: '21'
+          distribution: 'temurin'
+          cache: 'gradle'
+
+      - name: Build Native Library
+        run: |
+          cmake -S native -B native/build -DCMAKE_BUILD_TYPE=Release
+          cmake --build native/build --config Release
+          # CMake outputs to native/build/ directory
+          if (!(Test-Path "natives/Release")) {
+              New-Item -ItemType Directory -Path "natives/Release" -Force
+          }
+          Copy-Item "native/build/chineseime_native.dll" "natives/Release/" -Force
+
+      - name: Build Mod Jar
+        run: ./gradlew build
+
+      - name: Upload Artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: mod-jar
+          path: build/libs/*.jar

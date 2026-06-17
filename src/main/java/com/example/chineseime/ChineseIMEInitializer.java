@@ -17,6 +17,9 @@ import org.lwjgl.glfw.GLFW;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
+import java.util.ArrayList;
+import java.util.List;
+
 @Environment(EnvType.CLIENT)
 public class ChineseIMEInitializer implements ClientModInitializer {
     public static final String MOD_ID = "chineseime";
@@ -122,6 +125,74 @@ public class ChineseIMEInitializer implements ClientModInitializer {
         });
 
         LOGGER.info("[ChineseIME] Initialization complete! Platform: {}", PlatformIMEManager.getPlatform());
+    }
+
+    private long findMinecraftWindow() {
+        try {
+            int currentPid = (int) ProcessHandle.current().pid();
+
+            final int targetPid = currentPid;
+            final List<Long> foundHwnds = new ArrayList<>();
+            final long[] minecraftWindowHwnd = {0};
+
+            WINDOWS_API.WNDENUMPROC callback = new WINDOWS_API.WNDENUMPROC() {
+                public boolean callback(HWND hWnd, Pointer userData) {
+                    try {
+                        int[] pid = new int[1];
+                        WINDOWS_API.INSTANCE.GetWindowThreadProcessId(hWnd, pid);
+                        if (pid[0] == targetPid) {
+                            int length = WINDOWS_API.INSTANCE.GetWindowTextLength(hWnd);
+                            if (length > 0) {
+                                char[] title = new char[length + 1];
+                                WINDOWS_API.INSTANCE.GetWindowText(hWnd, title, length + 1);
+                                String titleStr = new String(title, 0, length);
+                                long hwndVal = Pointer.nativeValue(hWnd.getPointer());
+                                LOGGER.info("[ChineseIME] Found window: '{}' (PID={}, HWND={})", titleStr, pid[0], hwndVal);
+
+                                if (titleStr.contains("Minecraft")) {
+                                    minecraftWindowHwnd[0] = hwndVal;
+                                }
+                            }
+                            foundHwnds.add(Pointer.nativeValue(hWnd.getPointer()));
+                        }
+                    } catch (Exception e) {
+                    }
+                    return true;
+                }
+            };
+
+            WINDOWS_API.INSTANCE.EnumWindows(callback, null);
+
+            if (minecraftWindowHwnd[0] != 0) {
+                LOGGER.info("[ChineseIME] Using Minecraft window HWND: {}", minecraftWindowHwnd[0]);
+                return minecraftWindowHwnd[0];
+            }
+
+            if (!foundHwnds.isEmpty()) {
+                long hwnd = foundHwnds.get(foundHwnds.size() - 1);
+                LOGGER.info("[ChineseIME] Using last HWND from enum: {} (of {} windows)", hwnd, foundHwnds.size());
+                return hwnd;
+            }
+
+            HWND foreground = WINDOWS_API.INSTANCE.GetForegroundWindow();
+            if (foreground != null) {
+                long hwnd = Pointer.nativeValue(foreground.getPointer());
+                LOGGER.info("[ChineseIME] Using foreground window HWND: {}", hwnd);
+                return hwnd;
+            }
+
+            HWND active = WINDOWS_API.INSTANCE.GetActiveWindow();
+            if (active != null) {
+                long hwnd = Pointer.nativeValue(active.getPointer());
+                LOGGER.info("[ChineseIME] Using active window HWND: {}", hwnd);
+                return hwnd;
+            }
+
+        } catch (Exception e) {
+            LOGGER.warn("[ChineseIME] findMinecraftWindow failed: {}", e.getMessage());
+            e.printStackTrace();
+        }
+        return 0;
     }
 
     public static ChineseIMEInitializer getInstance() {

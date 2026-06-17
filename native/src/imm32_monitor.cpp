@@ -1,5 +1,4 @@
 #include "imm32_monitor.h"
-#include "jni_callback.h"
 #include "ime_state_manager.h"
 #include <imm.h>
 #include <algorithm>
@@ -111,7 +110,7 @@ void Imm32Monitor::update() {
 void Imm32Monitor::processComposition(HWND hwnd, HIMC himc) {
     std::wstring composition;
 
-    LONG compLen = ImmGetCompositionString(himc, GCS_COMPREADSTR, nullptr, 0);
+    LONG compLen = ImmGetCompositionString(himc, GCS_COMPSTR, nullptr, 0);
     if (compLen > 0) {
         int wcharLen = compLen / sizeof(wchar_t);
         std::vector<wchar_t> compBuf(wcharLen + 1);
@@ -163,7 +162,7 @@ LRESULT CALLBACK Imm32Monitor::wndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARA
             if (fgWnd) {
                 HIMC himc = ImmGetContext(fgWnd);
                 if (himc) {
-                    if (lParam & GCS_COMPREADSTR) {
+                    if (lParam & GCS_COMPSTR) {
                         g_imm32Monitor->processComposition(fgWnd, himc);
                     }
                     ImmReleaseContext(fgWnd, himc);

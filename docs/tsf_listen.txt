@@ -1,0 +1,100 @@
+# ChineseIME Mod - TSF/IMM32 技术笔记
+
+> 📝 **参考文档**：本文档记录了 TSF 和 IMM32 架构的技术细节，部分信息可能已过时。请结合当前代码验证。
+
+## IME HKL ID 对照表
+
+| 输入法 (IME) | 对应的 HKL (十六进制) | 备注 |
+| :--- | :--- | :--- |
+| **注音输入法** | `E0010404` | 适用于繁体中文 |
+| **仓颉输入法** | `E0020404` | 适用于繁体中文 |
+| **速成输入法** | `E0030404` | 适用于繁体中文 |
+| **五笔输入法** | `E0100804` | 适用于简体中文（王码五笔型86版） |
+
+> **注意**：这组 ID 属于**传统的 IMM32 架构**。现代的五笔/拼音输入法（如你图中所列），已全面转向 TSF 框架，通常**没有固定的 HKL 标识符**。
+
+## 在模组中如何使用
+
+#### 1. 输入法类型检测
+
+检测到键盘布局切换时，比对 HKL 来判断输入法类型：
+
+```java
+public static final String HKL_QUICK = "E0030404"; // 速成
+public static final String HKL_CANGJIE = "E0020404"; // 仓颉
+public static final String HKL_ZHUYIN = "E0010404"; // 注音
+public static final String HKL_WUBI = "E0100804"; // 五笔
+```
+
+#### 2. 动态切换监听模式（TSF → IMM32）
+
+```java
+public void onKeyboardLayoutChanged(String hkl) {
+    if (HKL_QUICK.equals(hkl) || HKL_CANGJIE.equals(hkl) || HKL_WUBI.equals(hkl)) {
+        // 切换到IMM32监听模式
+        switchToIMM32Listener();
+    } else {
+        // 现代输入法，继续使用TSF监听模式
+        switchToTSFListener();
+    }
+}
+```
+
+#### 3. 应对 TSF 输入法"无固定 HKL"的情况
+
+对于微软拼音等现代 TSF 输入法，`GetKeyboardLayout` 可能返回 `0x0804`，无法精确区分：
+
+```java
+if (hkl.equals("00000804") || hkl.endsWith("0804")) {
+    // 通过TSF接口的GetDescription进一步判断
+    String description = getTSFInputMethodDescription();
+    if (description.contains("拼音")) {
+        currentImeType = ImeType.PINYIN;
+    } else if (description.contains("五笔")) {
+        currentImeType = ImeType.WUBI;
+    }
+}
+```
+
+---
+
+## 微软中文输入法架构类型速查表
+
+| 输入法 (IME) | 主要架构 | 备注与说明 |
+| :--- | :--- | :--- |
+| **微软拼音 (MSPY)** | TSF + IMM32 | **双架构实现**。出于兼容性考虑，微软拼音同时实现了TSF和IMM32两套接口。但在Windows 10/11系统中，它主要通过TSF框架运行。 |
+| **微软五笔 (MSWB)** | TSF | **现代TSF架构**。Windows 10/11中的新版微软五笔是基于TSF框架开发的，为用户提供了更现代的体验。 |
+| **微软注音 (New Phonetic)** | TSF | **现代TSF架构**。与五笔类似，Windows 10/11中的微软注音也是以TSF框架为基础构建的。 |
+| **微软仓颉** | IMM32 (Legacy) | **传统IMM32架构**。微软官方文档将其归类为"Microsoft Traditional Chinese Legacy IMEs"，并明确指出它需要IMM32组件才能运行。 |
+| **微软速成 (Quick)** | IMM32 (Legacy) | **传统IMM32架构**。与仓颉一样，速成也属于微软的传统中文输入法，基于IMM32架构。 |
+| **微软旧注音 (Classic Phonetic)** | IMM32 (Legacy) | **传统IMM32架构**。历史上，旧版注音是基于IMM32的。但在现代系统中，可能需要专门的TSF实现才能在UWP应用中使用。 |
+| **微软内码 (Code Page)** | IMM32 (Legacy) | **传统IMM32架构**。作为历史遗留组件，内码输入法也运行在IMM32框架下。 |
+| **微软行列 (Array)** | IMM32 (Legacy) | **传统IMM32架构**。行列输入法同属"传统中文输入法"类别，基于IMM32。 |
+| **微软大易 (Dayi)** | IMM32 (Legacy) | **传统IMM32架构**。大易输入法也在此列，属于基于IMM32的传统输入法。 |
+
+---
+
+## 关键点与模组开发策略
+
+- **IMM32 不是"过去式"**：尽管TSF是主流，但IMM32作为兼容层依然存在于Windows系统中。这也是为什么在你的模组中实现IMM32回退能有效提高兼容性。
+- **检测"双架构"输入法的复杂性**：像微软拼音这种同时实现两套架构的输入法，在不同应用场景下可能会动态切换。因此，简单地通过检测键盘布局ID（HKL）来判断架构类型可能不够准确。
+- **结合你的模组开发策略**：
+  - **TSF优先**：对于主流的拼音、五笔、注音，你**应优先使用TSF接口进行监听**。这能获得最完整的候选词信息和最佳兼容性。
+  - **IMM32兜底**：对于仓颉、速成等传统输入法，你可以**回退到IMM32接口**。在监听到用户切换至这类输入法时，动态切换到IMM32监听模式。
+
+---
+
+## 附加技术说明
+
+### JNA 与 JNI
+
+- JNA (Java Native Access) 允许 Java 代码直接调用本地动态链接库中的函数
+- JNI (Java Native Interface) 是 Java 原生接口，功能更强大但开发复杂度更高
+
+### 关于回调机制
+
+当前实现使用 C-style 函数指针通过 JNA 传递回调，而非 COM 接口。这降低了复杂度但保留了事件驱动的优势。
+
+### 第三方输入法支持
+
+搜狗、QQ拼音、百度等第三方输入法可能不完全遵循标准 IME 接口。当前代码通过窗口枚举方式 (`EnumCandidateWindowsProc`) 获取候选词作为回退。

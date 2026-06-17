@@ -6,7 +6,6 @@ import com.sun.jna.Callback;
 import com.sun.jna.Memory;
 import com.sun.jna.Native;
 import com.sun.jna.Pointer;
-import com.sun.jna.WString;
 import com.sun.jna.win32.StdCallLibrary;
 import com.sun.jna.win32.W32APIOptions;
 import java.io.InputStream;
@@ -15,7 +14,7 @@ import java.nio.file.Path;
 import java.nio.file.StandardCopyOption;
 import java.util.ArrayList;
 import java.util.List;
-import java.util.concurrent.ConcurrentLinkedQueue;
+import java.util.concurrent.CopyOnWriteArrayList;
 
 public class NativeImeBridge {
 
@@ -41,12 +40,13 @@ public class NativeImeBridge {
     public static final int IME_TYPE_CANGJIE = 4;
     public static final int IME_TYPE_WUBI = 5;
     public static final int IME_TYPE_SUCHENG = 6;
+    public static final int IME_TYPE_SOGOU = 7;
     public static final int IME_TYPE_OTHER_CHINESE = 99;
 
     private static NativeLibrary INSTANCE = null;
     private static boolean loaded = false;
     private static boolean loadAttempted = false;
-    private static final Object LOAD_LOCK = new Object();
+    private static Path cachedDllPath = null;
 
     private static CandidateUpdateCallback sCandidateCallback = null;
     private static LayoutChangeCallback sLayoutCallback = null;
@@ -79,7 +79,7 @@ public class NativeImeBridge {
             loadAttempted = true;
             loadNative();
         }
-        return INSTANCE;
+        return loaded && INSTANCE != null;
     }
 
 private static void loadNative() {
@@ -115,47 +115,58 @@ private static void loadNative() {
         e.printStackTrace();
         loaded = false;
     }
-}
 
-    public static boolean startListening(long hwnd) {
-        if (!isAvailable()) return false;
-
-        Pointer hwndPtr = hwnd != 0L ? Pointer.createConstant(hwnd) : null;
-        int result = INSTANCE.StartListen(hwndPtr);
-        return result == 1;
+    public interface PreeditCallback extends Callback {
+        void invoke(Pointer text, int cursor, int selLen);
     }
 
-    public static void stopListening() {
-        if (isAvailable()) {
-            INSTANCE.StopListen();
+    public interface CommitCallback extends Callback {
+        void invoke(Pointer text);
+    }
+
+    public interface CandidatesCallback extends Callback {
+        void invoke(Pointer candidates, int count, int selectedIndex);
+    }
+
+    public interface ImeChangeCallback extends Callback {
+        void invoke(int imeType, int chineseMode);
+    }
+
+    public static void hookWindowProc(long hwnd) {
+        if (!isAvailable()) return;
+        try {
+            int result = INSTANCE.HookWindowProcRaw(hwnd);
+            ChineseIMEInitializer.LOGGER.info("[ChineseIME] HookWindowProcRaw result: {}", result);
+        } catch (Exception e) {
+            ChineseIMEInitializer.LOGGER.warn("[ChineseIME] HookWindowProc failed: {}", e.getMessage());
         }
     }
 
-    public static int startTsfListening() {
-        if (!isAvailable()) return 0;
-        return INSTANCE.StartTsfListen();
-    }
-
-    public static void stopTsfListening() {
-        if (isAvailable()) {
-            INSTANCE.StopTsfListen();
+    public static void registerCallbacks(PreeditCallback preedit, CommitCallback commit,
+            CandidatesCallback candidates, ImeChangeCallback imeChange) {
+        if (!isAvailable()) return;
+        try {
+            INSTANCE.SetEventCallbacks(preedit, commit, candidates, imeChange);
+            ChineseIMEInitializer.LOGGER.info("[ChineseIME] IME callbacks registered");
+        } catch (Exception e) {
+            ChineseIMEInitializer.LOGGER.warn("[ChineseIME] Failed to register callbacks: {}", e.getMessage());
         }
     }
 
-    public static boolean isTsfListening() {
-        return isAvailable() && INSTANCE.IsTsfListening() == 1;
+    public static void unhookWindowProc() {
+        if (isAvailable()) {
+            INSTANCE.UnhookWindowProc();
+        }
     }
 
-    public static boolean isChineseMode() {
-        return isAvailable() && INSTANCE.IsChineseMode() == 1;
+    public static boolean isWindowHooked() {
+        return isAvailable() && INSTANCE.IsWindowHooked() == 1;
     }
 
-    public static boolean hasLayoutChanged() {
-        return isAvailable() && INSTANCE.HasLayoutChanged() == 1;
-    }
-
-    public static boolean hasTsfLayoutChanged() {
-        return isAvailable() && INSTANCE.HasTsfLayoutChanged() == 1;
+    public static void refreshCandidates() {
+        if (isAvailable()) {
+            INSTANCE.RefreshCandidates();
+        }
     }
 
     public static String getCompositionString() {
@@ -181,8 +192,7 @@ private static void loadNative() {
     public static List<String> getCandidates() {
         List<String> result = new ArrayList<>();
         if (!isAvailable()) return result;
-
-        int count = INSTANCE.GetCandidateCount();
+        int count = getCandidateCount();
         for (int i = 0; i < count && i < 20; i++) {
             String cand = getCandidate(i);
             if (!cand.isEmpty()) {
@@ -200,14 +210,8 @@ private static void loadNative() {
         return isAvailable() && INSTANCE.GetImeOpenStatus() == 1;
     }
 
-    public static boolean getTsfChineseMode() {
-        return isAvailable() && INSTANCE.GetTsfChineseMode() == 1;
-    }
-
-    public static void refreshImeState() {
-        if (isAvailable()) {
-            INSTANCE.RefreshImeState();
-        }
+    public static boolean isChineseMode() {
+        return isAvailable() && INSTANCE.GetChineseMode() == 1;
     }
 
     public static boolean getShiftMode() {
@@ -270,7 +274,7 @@ private static void loadNative() {
             case IME_TYPE_CANGJIE -> InputMode.CANGJIE;
             case IME_TYPE_WUBI -> InputMode.WUBI;
             case IME_TYPE_SUCHENG -> InputMode.SUCHENG;
-            case IME_TYPE_OTHER_CHINESE -> InputMode.OTHER;
+            case IME_TYPE_SOGOU -> InputMode.SOGOU;
             default -> InputMode.OTHER;
         };
     }
@@ -324,9 +328,7 @@ private static void loadNative() {
         int GetCandidate(int index, Pointer buffer, int bufferSize);
         int GetSelectedCandidateIndex();
         int GetImeOpenStatus();
-        int GetTsfChineseMode();
-        int HasTsfLayoutChanged();
-        int GetInputMethodType();
+        int GetChineseMode();
         int GetShiftMode();
         int GetCapsLockState();
         int GetKeyboardStateForPolling(int vKey);

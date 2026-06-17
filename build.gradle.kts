@@ -20,6 +20,9 @@ loom {
 
 repositories {
     mavenCentral()
+    maven("https://maven.aliyun.com/repository/public/") {
+        name = "AliyunMirror"
+    }
     maven("https://maven.fabricmc.net/")
     // Cloth Config (AutoConfig 依赖)
     maven("https://maven.shedaniel.me/")
@@ -47,6 +50,7 @@ dependencies {
     
     // ModMenu (配置界面入口)
     modImplementation("com.terraformersmc:modmenu:12.0.0-beta.1")
+    modApi("com.terraformersmc:modmenu:12.0.0-beta.1")
     
     // JNA (Java Native Access) - 用于调用Windows IMM32/TSF API
     implementation("net.java.dev.jna:jna:5.14.0")
@@ -55,14 +59,15 @@ dependencies {
 
 tasks.processResources {
     inputs.properties("version" to version)
-    
+
     filesMatching("fabric.mod.json") {
         expand("version" to version)
     }
-    
-    // 复制native DLL文件到JAR中
+
+    // 复制native DLL文件到JAR中 (按架构分类)
     from("natives/Release") {
-        into("META-INF/natives")
+        into("META-INF/natives/amd64")
+        include("*.dll")
     }
 }
 

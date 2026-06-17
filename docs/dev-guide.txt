@@ -1,0 +1,115 @@
+# ChineseIME Mod 重构指南
+
+> ⚠️ **历史文档**：本文档为早期重构设计文档，部分内容已过时。重要参考：
+> - `ime_callback.h` 明确说明："所有全局 g_* 回调指针已移除；回调统一通过 WinEventBridge::EventCallbacks 管理"
+> - `jni_callback.h/cpp` 已被删除
+> - 当前实现请参考 AGENTS.md 和实际代码
+
+---
+
+## 一、当前问题诊断（历史）
+
+回顾当时遇到的主要问题：
+
+- **JNA加载与函数查找失败**：DLL导出函数名与Java映射不匹配，调用约定混乱。
+- **无法监听候选词**：TSF事件未正确注册，或IMM32回退逻辑不生效。
+- **指示器状态抖动**：输入法类型与中/英文模式判断逻辑冲突，HKL/TSF GUID检测结果互相覆盖。
+- **仓颉、注音等输入法无法识别**：过度依赖HKL（现代输入法不改变HKL），TSF GUID检测逻辑被后续HKL判断覆盖。
+- **Shift英文模式检测失效**：没有正确监听`ITfCompartmentEventSink`或`ImmGetConversionStatus`。
+
+---
+
+## 二、重构目标（已部分实现）
+
+1. **明确单一状态源**：所有输入法状态（类型、中英文、候选词）统一由一个`ImeStateManager`管理 ✓
+2. **平台抽象分层**：定义抽象的`ImeMonitor`接口... ⚠️ 部分实现
+3. **可靠的类型识别**：Windows下以TSF `ITfInputProcessorProfileActivationSink`的GUID为主，HKL仅作为fallback ✓
+4. **稳定的候选词获取**：TSF中使用`ITfCandidateList`，IMM32使用`ImmGetCandidateList` ✓
+5. **线程安全回调**：C++通过统一回调对象向Java推送事件 ✓
+
+---
+
+## 三、新架构设计（参考）
+
+当前实现的架构已部分采用此设计：
+
+```
+┌─────────────────────────────────────────┐
+│  Java (Minecraft)                       │
+│  ┌───────────────────────────────────┐  │
+│  │  WindowsIMEBridgeNative            │  │
+│  │  - handlePreedit                  │  │
+│  │  - handleCommit                   │  │
+│  │  - handleCandidates               │  │
+│  │  - handleImeChange                │  │
+│  └───────────────────────────────────┘  │
+│              ▲                            │
+│              │ (通过回调或轮询)           │
+│  ┌───────────┴───────────────────────┐  │
+│  │  NativeImeBridge (JNI管理)        │  │
+│  └───────────────────────────────────┘  │
+└──────────────────┬──────────────────────┘
+                   │ JNA
+┌──────────────────┴──────────────────────┐
+│  C++ DLL (chineseime_native)           │
+│  ┌───────────────────────────────────┐  │
+│  │  ImeStateManager (单例)           │  │
+│  │  - 当前类型、中英文模式、候选词   │  │
+│  │  - 变更通知 (回调Java)            │  │
+│  └───────────────────────────────────┘  │
+│           ▲            ▲                 │
+│           │            │                 │
+│  ┌────────┴──┐  ┌─────┴───────┐         │
+│  │ TsfMonitor │  │ WinEventBridge│      │
+│  │ (Windows)  │  │ (主事件路径) │        │
+│  └────────────┘  └─────────────┘         │
+└──────────────────────────────────────────┘
+```
+
+---
+
+## 四、Windows平台Monitor（参考）
+
+### 4.1 TsfMonitor（参考）
+
+实际实现在 `tsf_monitor.cpp`，使用了：
+- `ITfInputProcessorProfileActivationSink` - IME 类型识别
+- `ITfCompartmentEventSink` - 中英文切换
+- `ITfUIElementSink` - 候选词列表
+
+### 4.2 WinEventBridge（主要事件路径）
+
+实际实现替代了原设计的部分内容，提供：
+- `SetWindowLongPtr(GWLP_WNDPROC)` 替换窗口过程
+- `EventCallbacks` (std::function) 管理回调
+- `ImeWndProc` 处理 WM_IME_* 消息
+
+---
+
+## 六、Java层重构（基本完成）
+
+当前实现 (`WindowsIMEBridgeNative.java`) 已完成：
+- JNA 桥接类 (`NativeImeBridge`)
+- 回调接口 (PreeditCallback, CommitCallback, CandidatesCallback, ImeChangeCallback)
+- UI 线程集成通过 `MinecraftClient.execute()`
+
+---
+
+## 八、关键代码片段（参考）
+
+当前代码中：
+- `ImeStateManager` 仍然是单例模式 ✓
+- WinEventBridge 使用 EventCallbacks (std::function) ✓
+- 回调通过 `SetEventCallbacks` 注册 ✓
+
+---
+
+## 九、总结
+
+重构的核心是**状态统一管理**和**职责分离**。当前实现已采用此思路，但与原始设计有部分差异：
+
+1. **WinEventBridge** 作为主要事件路径（替代了部分 TsfMonitor 功能）
+2. **TsfMonitor** 作为补充（TSF 事件监听）
+3. **Java 轮询** 作为最终降级
+
+请参考当前代码和 AGENTS.md 获取最新架构信息。

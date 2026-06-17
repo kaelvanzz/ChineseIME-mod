@@ -1,0 +1,75 @@
+# ChineseIME Mod - 调试思路笔记（历史）
+
+> ⚠️ **历史文档**：本文档记录了早期调试过程中的思路和解决方案。部分内容可能已过时，仅供参考。
+
+---
+
+## 主要调试思路（历史）
+
+### 1. "跳板"方案：编写一个极简的 C++ 辅助 DLL
+
+与其在 Java 裡用 JNA 去处理複杂的 COM 指针、引用计数和回调，不如写一个几十行的 C++ DLL。
+
+### 2. "外挂"方案：利用 UI Automation (UIA)
+
+使用 Windows 的 **UI Automation API** 读取候选词窗口。
+
+### 3. "复古"方案：强制开启"兼容模式" (Legacy IME)
+
+开启后输入法回退到 **IMM32** 协议。
+
+### 4. "极客"方案：挂钩 `WM_IME_NOTIFY`
+
+监听 `WM_IME_NOTIFY` 讯息中的 `IMN_OPENCANDIDATE` 指令。
+
+---
+
+## C++ DLL 与 Java 之间的消息传递
+
+**使用 "轮询 (Polling)" 还是 "回调 (Callback)"？**
+
+已选择：**回调 (Callback)** - 主动通知延迟更低，CPU 资源消耗更小。
+
+### 在 JNA 实现主动通知的小贴士
+
+- **JNA Callback 接口**：需要定义继承自 `com.sun.jna.Callback` 的 Interface
+- **执行绪安全 (Thread Safety)**：Windows 的 TSF 运行在特定的线程（STA），需要通过 `ConcurrentLinkedQueue` 或 Minecraft 的 `execute()` 同步到主线程
+
+---
+
+## JNA 调试步骤（历史）
+
+### 第一步：精确检查函数名
+
+- 使用 `extern "C"` 来声明导出函数，防止 Name Mangling
+- 使用工具验证 DLL 内部符号（Dependency Walker, DLL Export Viewer）
+
+### 第二步：核对调用约定
+
+- Windows API 大多使用 `__stdcall`
+- Java 侧应继承 `StdCallLibrary`
+
+### 第三步：检查架构（32/64位）是否一致
+
+### 第四步：检查 DLL 的依赖项
+
+---
+
+## 关键洞察（仍有效）
+
+1. **IMM32 不是"过去式"**：IMM32 作为兼容层仍然存在于 Windows 系统中
+2. **双架构输入法**：像微软拼音这种同时实现两套架构的输入法，在不同应用场景下可能会动态切换
+3. **TSF 优先 + IMM32 兜底**：这是当前采用的设计策略
+
+---
+
+## 当前实现状态
+
+当前代码已整合了上述调试思路：
+
+- ✅ 使用 C++ DLL 封装 TSF/IMM32 逻辑
+- ✅ 使用 JNA 回调机制（函数指针）
+- ✅ 事件驱动 + 轮询降级
+- ✅ 窗口枚举作为第三方输入法回退
+
+请参考 AGENTS.md 和实际代码了解当前实现细节。

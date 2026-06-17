@@ -273,8 +273,14 @@ public class CandidateHud {
         return widths;
     }
 
-    public void render(DrawContext ctx) {
-        if (!this.visible) return;
+    public void onMouseMove(double mouseX, double mouseY, float scale) {
+        if (!this.visible) {
+            this.prevArrowHovered = false;
+            this.nextArrowHovered = false;
+            return;
+        }
+        int mx = (int) mouseX;
+        int my = (int) mouseY;
 
         MinecraftClient mc = MinecraftClient.getInstance();
         TextRenderer font = mc.textRenderer;
@@ -335,6 +341,7 @@ public class CandidateHud {
 
         for (int i = start; i < end; i++) {
             String cand = this.candidates.get(i);
+            int itemW = getItemWidth(i, scale);
             boolean isSelected = i == this.selected;
             int localIndex = (i - start) + 1;
             int localIdx = i - start;

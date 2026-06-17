@@ -385,6 +385,8 @@ public class ConfigScreen extends Screen {
     public boolean mouseClicked(double mouseX, double mouseY, int button) {
         int mx = (int) mouseX;
         int my = (int) mouseY;
+        this.mouseX = mx;
+        this.mouseY = my;
 
         if (waitingForKeybind) {
             waitingForKeybind = false;

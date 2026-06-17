@@ -1,7 +1,8 @@
 #include "tsf_monitor.h"
 #include "ime_state_manager.h"
+#include "ime_detector.h"
 #include "sta_thread.h"
-#include "jni_callback.h"
+#include "win_event_bridge.h"
 #include <comdef.h>
 #include <algorithm>
 #include <msctf.h>
@@ -87,6 +88,8 @@ TsfMonitor::~TsfMonitor() {
 bool TsfMonitor::initialize(IUnknown* pThreadMgr) {
     if (!pThreadMgr) return false;
 
+    DEBUG_LOG_SIMPLE(L"[ChineseIME] TsfMonitor::initialize: starting\n");
+
     HRESULT hr = pThreadMgr->QueryInterface(IID_ITfThreadMgr, (void**)&threadMgr_);
     if (FAILED(hr)) {
         DEBUG_LOG_SIMPLE(L"[ChineseIME] Failed to get ITfThreadMgr\n");
@@ -98,18 +101,64 @@ bool TsfMonitor::initialize(IUnknown* pThreadMgr) {
         DEBUG_LOG_SIMPLE(L"[ChineseIME] No focused document manager\n");
     }
 
+    // Get ITfSource from ITfThreadMgr for sink registration
     ITfSource* source = nullptr;
     hr = threadMgr_->QueryInterface(IID_ITfSource, (void**)&source);
-    if (SUCCEEDED(hr) && source) {
+    if (FAILED(hr) || !source) {
+        char dbg[128];
+        sprintf_s(dbg, "[ChineseIME] QueryInterface ITfSource failed: hr=0x%X\n", hr);
+        OutputDebugStringA(dbg);
+    } else {
+        // QueryInterface gives us refcount=1
+        // AdviseSink will addRef, UnadviseSink will Release
+
+        // Register profile activation sink (for detecting IME type changes)
+        DWORD profileCookie = TF_INVALID_COOKIE;
         hr = source->AdviseSink(IID_ITfInputProcessorProfileActivationSink,
-            static_cast<ITfInputProcessorProfileActivationSink*>(this), &profileSinkCookie_);
+            static_cast<ITfInputProcessorProfileActivationSink*>(this), &profileCookie);
         if (SUCCEEDED(hr)) {
-            threadMgrSource_ = source;
+            profileSinkCookie_ = profileCookie;
+            threadMgrSource_ = source;  // Take ownership
             DEBUG_LOG_SIMPLE(L"[ChineseIME] Profile sink registered\n");
         } else {
-            source->Release();
+            char dbg[128];
+            sprintf_s(dbg, "[ChineseIME] AdviseSink(Profile) failed: hr=0x%X\n", hr);
+            OutputDebugStringA(dbg);
+        }
+
+        // Register UI element sink for candidate list notifications
+        // Use the SAME source pointer - ITfSource supports multiple sinks
+        DWORD uiElemCookie = TF_INVALID_COOKIE;
+        hr = source->AdviseSink(IID_ITfUIElementSink,
+            static_cast<ITfUIElementSink*>(this), &uiElemCookie);
+        if (SUCCEEDED(hr)) {
+            uiElementSinkCookie_ = uiElemCookie;
+            OutputDebugStringA("[ChineseIME] UIElement sink registered OK\n");
+            // If profile sink failed, we still own the source reference via UIElement sink
+            if (!threadMgrSource_) {
+                threadMgrSource_ = source;  // Take ownership
+            }
+        } else {
+            char dbg[128];
+            sprintf_s(dbg, "[ChineseIME] UIElement sink AdviseSink failed: hr=0x%X\n", hr);
+            OutputDebugStringA(dbg);
+            // If profile sink also failed, release our reference
+            if (!threadMgrSource_) {
+                source->Release();
+                source = nullptr;
+            }
         }
     }
+
+    // Get UI element manager for reading candidates from UI elements
+    ITfUIElementMgr* uiElemMgr = nullptr;
+    hr = threadMgr_->QueryInterface(IID_ITfUIElementMgr, (void**)&uiElemMgr);
+    if (SUCCEEDED(hr) && uiElemMgr) {
+        uiElementMgr_ = uiElemMgr;
+        OutputDebugStringA("[ChineseIME] UIElementMgr obtained\n");
+    }
+
+    DEBUG_LOG_SIMPLE(L"[ChineseIME] TsfMonitor::initialize: done\n");
 
     if (docMgr_) {
         ITfContext* ctx = nullptr;
@@ -126,6 +175,18 @@ bool TsfMonitor::initialize(IUnknown* pThreadMgr) {
 
 void TsfMonitor::shutdown() {
     unregisterSinks();
+
+    // Unregister UI element sink
+    if (threadMgrSource_ && uiElementSinkCookie_ != TF_INVALID_COOKIE) {
+        threadMgrSource_->UnadviseSink(uiElementSinkCookie_);
+        uiElementSinkCookie_ = TF_INVALID_COOKIE;
+    }
+
+    // Release UI element manager
+    if (uiElementMgr_) {
+        uiElementMgr_->Release();
+        uiElementMgr_ = nullptr;
+    }
 
     if (threadMgrSource_) {
         if (profileSinkCookie_ != TF_INVALID_COOKIE) {
@@ -150,6 +211,66 @@ void TsfMonitor::shutdown() {
 
 void TsfMonitor::refreshState() {
     updateCache();
+}
+
+void TsfMonitor::pollUpdate() {
+    // Always try to query the current input method on each poll
+    // The HKL might have changed
+    queryCurrentInputMethod();
+
+    // If we detected a type, update the state manager
+    if (currentInputMethod_ != InputMethodType::UNKNOWN && currentInputMethod_ != InputMethodType::ENGLISH) {
+        ImeStateManager::get().updateInputMethod(currentInputMethod_);
+    }
+
+    // Also check via HKL for consistency - use foreground window's thread
+    HWND fgWnd = GetForegroundWindow();
+    if (fgWnd) {
+        DWORD fgThreadId = GetWindowThreadProcessId(fgWnd, nullptr);
+        HKL hkl = GetKeyboardLayout(fgThreadId);
+        if (hkl) {
+            InputMethodType hklType = detectInputMethodTypeFromHklSafe(hkl);
+
+            // If HKL indicates non-Chinese keyboard (ENGLISH), force update to ENGLISH
+            if (hklType == InputMethodType::ENGLISH || hklType == InputMethodType::UNKNOWN) {
+                if (currentInputMethod_ != InputMethodType::ENGLISH) {
+                    currentInputMethod_ = InputMethodType::ENGLISH;
+                    ImeStateManager::get().updateInputMethod(InputMethodType::ENGLISH);
+                }
+            } else if (hklType != currentInputMethod_) {
+                currentInputMethod_ = hklType;
+                ImeStateManager::get().updateInputMethod(hklType);
+            }
+        }
+    }
+
+    // Update candidates and composition from TSF/IMM
+    // This is critical for showing candidates in the HUD
+    updateCache();
+
+    // FALLBACK: If IMM32 returned 0 candidates but we're in Chinese mode,
+    // try reading candidates from the IME's candidate window directly.
+    // This is needed for TSF IMEs like Microsoft Pinyin and Sogou that
+    // don't reliably expose candidates via IMM32 or TSF UIElement callbacks.
+    auto state = ImeStateManager::get().getSnapshot();
+    bool needsFallback = (state.inputMethodType != InputMethodType::ENGLISH &&
+        state.inputMethodType != InputMethodType::UNKNOWN &&
+        state.candidates.empty());
+    bool needsFallbackEvenWithComp = needsFallback && !state.composition.empty();
+    // Sogou may show candidates even with empty composition
+    bool sogouNeedsFallback = (state.inputMethodType == InputMethodType::SOGOU ||
+        state.inputMethodType == InputMethodType::PINYIN) && state.candidates.empty();
+
+    if (needsFallbackEvenWithComp || sogouNeedsFallback) {
+        std::vector<std::wstring> windowCandidates = chineseime::collectCandidatesFromWindowEnumeration();
+        if (!windowCandidates.empty()) {
+            char dbg[128];
+            sprintf_s(dbg, "[ChineseIME] Window enumeration found %d candidates (type=%d)\n",
+                (int)windowCandidates.size(), (int)state.inputMethodType);
+            OutputDebugStringA(dbg);
+            ImeStateManager::get().updateCandidates(state.composition, windowCandidates, 0);
+        }
+    }
 }
 
 STDMETHODIMP TsfMonitor::QueryInterface(REFIID riid, void** ppv) {
@@ -245,10 +366,31 @@ STDMETHODIMP TsfMonitor::EndUIElement(DWORD dwUIElementId) {
 
 STDMETHODIMP TsfMonitor::OnActivated(DWORD dwProfileType, LANGID langid, REFCLSID clsid,
                                      REFGUID guidProfile, REFGUID guidCat, HKL hkl, DWORD dwFlags) {
+    char dbg[512];
+    sprintf_s(dbg, "[ChineseIME] OnActivated: profileType=%d, langid=0x%04X, hkl=0x%IX, flags=0x%X\n"
+        "  clsid.Data1=0x%08X, guidProfile.Data1=0x%08X\n",
+        (int)dwProfileType, langid, (DWORD64)hkl, dwFlags,
+        clsid.Data1, guidProfile.Data1);
+    OutputDebugStringA(dbg);
+
+    // updateInputMethodType now updates ImeStateManager internally
     updateInputMethodType(langid, clsid, guidProfile);
 
-    DEBUG_LOG(L"[ChineseIME] OnActivated: type=%d, langid=0x%04x, hkl=0x%08X, flags=0x%x\n",
-        (int)currentInputMethod_, langid, (DWORD)(DWORD_PTR)hkl, dwFlags);
+    // If TSF detection gave UNKNOWN/ENGLISH, try HKL as fallback
+    if (currentInputMethod_ == InputMethodType::UNKNOWN || currentInputMethod_ == InputMethodType::ENGLISH) {
+        if (hkl) {
+            InputMethodType hklType = detectInputMethodTypeFromHklSafe(hkl);
+            sprintf_s(dbg, "[ChineseIME] OnActivated: HKL fallback type=%d\n", (int)hklType);
+            OutputDebugStringA(dbg);
+            if (hklType != InputMethodType::UNKNOWN && hklType != InputMethodType::ENGLISH) {
+                currentInputMethod_ = hklType;
+                ImeStateManager::get().updateInputMethod(hklType);
+            }
+        }
+    }
+
+    sprintf_s(dbg, "[ChineseIME] OnActivated: FINAL currentInputMethod_=%d\n", (int)currentInputMethod_);
+    OutputDebugStringA(dbg);
 
     if (dwFlags & TF_IPSINK_FLAG_ACTIVE) {
         if (currentInputMethod_ != InputMethodType::UNKNOWN) {
@@ -366,7 +508,12 @@ void TsfMonitor::updateCache() {
         if (getCandidateList(ctx, candidates, selectedIndex)) {
             candidatesFound = true;
         }
+        sprintf_s(dbg, "[ChineseIME] updateCache: TSF candidatesFound=%d, candCnt=%d\n", 
+            candidatesFound ? 1 : 0, (int)candidates.size());
+        OutputDebugStringA(dbg);
         ctx->Release();
+    } else {
+        OutputDebugStringA("[ChineseIME] updateCache: TSF ctx=NULL, using IMM fallback\n");
     }
 
     if (!candidatesFound) {
@@ -505,12 +652,13 @@ ITfContext* TsfMonitor::getCurrentContext() {
 }
 
 void TsfMonitor::notifyStateChanges(const IMEState& oldState, const IMEState& newState) {
+    // Notify Java via WinEventBridge (TSF-initiated composition/candidate change)
     if (oldState.composition != newState.composition || oldState.candidates != newState.candidates) {
         std::vector<const wchar_t*> candidatePtrs;
         for (const auto& cand : newState.candidates) {
             candidatePtrs.push_back(cand.c_str());
         }
-        onCandidateChanged(
+        WinEventBridge::get().fireCandidateCallback(
             newState.composition.c_str(),
             candidatePtrs.empty() ? nullptr : candidatePtrs.data(),
             static_cast<int>(newState.candidates.size()),
@@ -526,6 +674,8 @@ if (oldState.inputMethodType != newState.inputMethodType || oldState.chineseMode
 bool TsfMonitor::getCompositionString(ITfContext* pic, std::wstring& result) {
     result.clear();
     if (!pic) return false;
+
+    if (ecReadOnly_ == 0) return false;
 
     ITfProperty* prop = nullptr;
     HRESULT hr = pic->GetProperty(GUID_PROP_COMPOSING, &prop);
@@ -567,78 +717,170 @@ bool TsfMonitor::getCompositionString(ITfContext* pic, std::wstring& result) {
 bool TsfMonitor::getCandidateList(ITfContext* pic, std::vector<std::wstring>& candidates, int& selectedIndex) {
     candidates.clear();
     selectedIndex = 0;
-    return getCandidateListFromProperty(pic, candidates, selectedIndex);
+    if (!pic) return false;
+    return getCandidateListFromProperty(pic, candidates, selectedIndex) && !candidates.empty();
 }
 
 bool TsfMonitor::getCandidateListFromProperty(ITfContext* pic, std::vector<std::wstring>& candidates, int& selectedIndex) {
     candidates.clear();
     selectedIndex = 0;
+    if (!pic) return false;
 
-    ITfProperty* prop = nullptr;
-    HRESULT hr = pic->GetProperty(GUID_PROP_CANDIDATE, &prop);
-    if (FAILED(hr) || !prop) {
+    bool success = false;
+    TsfEditSession* session = new TsfEditSession(pic, &candidates, &success);
+    HRESULT hrSession = S_OK;
+    HRESULT hr = pic->RequestEditSession(TF_CLIENTID_NULL, session, TF_ES_SYNC | TF_ES_READ, &hrSession);
+    session->Release();
+
+    if (FAILED(hr) || !success) {
         return false;
     }
 
-    IEnumTfRanges* enumRanges = nullptr;
-    hr = prop->EnumRanges(ecReadOnly_, &enumRanges, nullptr);
-    prop->Release();
-    if (FAILED(hr) || !enumRanges) {
-        return false;
-    }
-
-    ITfRange* range = nullptr;
-    while (enumRanges->Next(1, &range, nullptr) == S_OK) {
-        if (range) {
-            wchar_t buffer[64];
-            ULONG fetched = 0;
-            hr = range->GetText(ecReadOnly_, 0, buffer, 63, &fetched);
-            if (SUCCEEDED(hr) && fetched > 0) {
-                buffer[fetched] = 0;
-                candidates.push_back(buffer);
-            }
-            range->Release();
-        }
-    }
-    enumRanges->Release();
     return !candidates.empty();
 }
 
 void TsfMonitor::updateInputMethodType(LANGID langid, REFCLSID clsid, REFGUID guidProfile) {
-    DEBUG_LOG(L"[ChineseIME] updateInputMethodType: langid=0x%04x\n", langid);
+    char dbg[1024];
+    sprintf_s(dbg, "[ChineseIME] updateInputMethodType: langid=0x%04x, clsid.Data1=0x%08X, guidProfile.Data1=0x%08X\n",
+        langid, clsid.Data1, guidProfile.Data1);
+    OutputDebugStringA(dbg);
 
-    if (langid == 0x0804 || langid == 0x0404 || langid == 0x0C04 || langid == 0x1404) {
-        bool detected = false;
+    currentInputMethod_ = detectInputMethodTypeFromGuid(guidProfile, clsid, langid);
 
-        if (IsEqualGUID(guidProfile, GUID_MS_PINYIN) || IsEqualGUID(clsid, GUID_MS_PINYIN)) {
-            currentInputMethod_ = InputMethodType::PINYIN;
-            detected = true;
-            DEBUG_LOG_SIMPLE(L"[ChineseIME] -> PINYIN (GUID match)\n");
-        } else if (IsEqualGUID(guidProfile, GUID_MS_ZHUYIN) || IsEqualGUID(clsid, GUID_MS_ZHUYIN)) {
-            currentInputMethod_ = InputMethodType::ZHUYIN;
-            detected = true;
-            DEBUG_LOG_SIMPLE(L"[ChineseIME] -> ZHUYIN (GUID match)\n");
-        } else if (IsEqualGUID(guidProfile, GUID_MS_CANGJIE) || IsEqualGUID(clsid, GUID_MS_CANGJIE)) {
-            currentInputMethod_ = InputMethodType::CANGJIE;
-            detected = true;
-            DEBUG_LOG_SIMPLE(L"[ChineseIME] -> CANGJIE (GUID match)\n");
-        } else if (IsEqualGUID(guidProfile, GUID_MS_WUBI) || IsEqualGUID(clsid, GUID_MS_WUBI)) {
-            currentInputMethod_ = InputMethodType::WUBI;
-            detected = true;
-            DEBUG_LOG_SIMPLE(L"[ChineseIME] -> WUBI (GUID match)\n");
-        } else if (IsEqualGUID(guidProfile, GUID_MS_SUCHENG) || IsEqualGUID(clsid, GUID_MS_SUCHENG)) {
-            currentInputMethod_ = InputMethodType::SUCHENG;
-            detected = true;
-            DEBUG_LOG_SIMPLE(L"[ChineseIME] -> SUCHENG (GUID match)\n");
+    sprintf_s(dbg, "[ChineseIME] updateInputMethodType: detected=%d (%S)\n",
+        (int)currentInputMethod_, getInputMethodTypeName(currentInputMethod_));
+    OutputDebugStringA(dbg);
+
+    if (currentInputMethod_ != InputMethodType::UNKNOWN && currentInputMethod_ != InputMethodType::ENGLISH) {
+        ImeStateManager::get().updateInputMethod(currentInputMethod_);
+    } else if (currentInputMethod_ == InputMethodType::ENGLISH) {
+        ImeStateManager::get().updateInputMethod(InputMethodType::ENGLISH);
+    }
+}
+
+void TsfMonitor::queryCurrentInputMethod() {
+    static int queryCount = 0;
+    static int g_debugCounter = 0;
+    static InputMethodType g_lastLoggedType = InputMethodType::UNKNOWN;
+
+    queryCount++;
+    if (queryCount <= 3) {
+        OutputDebugStringA("[ChineseIME] queryCurrentInputMethod called\n");
+    }
+
+    WCHAR klName[16] = {0};
+    if (!GetKeyboardLayoutNameW(klName) || !klName[0]) {
+        if (queryCount <= 3) OutputDebugStringA("[ChineseIME] queryCurrentInputMethod: klName failed\n");
+        return;
+    }
+
+    if (queryCount <= 3) {
+        char dbg[128];
+        sprintf_s(dbg, "[ChineseIME] queryCurrentInputMethod: klName=%S\n", klName);
+        OutputDebugStringA(dbg);
+    }
+
+    bool typeFromTsf = false;
+    InputMethodType descType = InputMethodType::UNKNOWN;
+
+    {
+        HRESULT hr = CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED);
+        bool comInitialized = SUCCEEDED(hr);
+
+        ITfInputProcessorProfiles* profiles = nullptr;
+        hr = CoCreateInstance(CLSID_TF_InputProcessorProfiles, nullptr,
+            CLSCTX_INPROC_SERVER, IID_ITfInputProcessorProfiles, (void**)&profiles);
+        if (SUCCEEDED(hr)) {
+            // Method 1: Get ITfInputProcessorProfileMgr and use GetActiveProfile (MOST RELIABLE)
+            ITfInputProcessorProfileMgr* profileMgr = nullptr;
+            hr = profiles->QueryInterface(IID_ITfInputProcessorProfileMgr, (void**)&profileMgr);
+            if (SUCCEEDED(hr) && profileMgr) {
+                TF_INPUTPROCESSORPROFILE activeFullProfile;
+                hr = profileMgr->GetActiveProfile(GUID_TFCAT_TIP_KEYBOARD, &activeFullProfile);
+                if (SUCCEEDED(hr)) {
+                    char dbg[256];
+                    sprintf_s(dbg, "[ChineseIME] GetActiveProfile: langid=0x%04X, clsid=0x%08X, guid=%08X, type=%d\n",
+                        activeFullProfile.langid, activeFullProfile.clsid.Data1,
+                        activeFullProfile.guidProfile.Data1, (int)activeFullProfile.dwProfileType);
+                    OutputDebugStringA(dbg);
+
+                    if ((activeFullProfile.langid == 0x0804 || activeFullProfile.langid == 0x0404) &&
+                        activeFullProfile.dwProfileType == TF_PROFILETYPE_INPUTPROCESSOR) {
+                        updateInputMethodType(activeFullProfile.langid, activeFullProfile.clsid, activeFullProfile.guidProfile);
+                        if (currentInputMethod_ != InputMethodType::UNKNOWN &&
+                            currentInputMethod_ != InputMethodType::ENGLISH &&
+                            currentInputMethod_ != InputMethodType::OTHER_CHINESE) {
+                            typeFromTsf = true;
+                            OutputDebugStringA("[ChineseIME] queryCurrentInputMethod: used GetActiveProfile\n");
+                        }
+                    }
+                }
+                profileMgr->Release();
+            }
+
+            // Method 3: Enumerate all profiles and find the active one
+            IEnumTfLanguageProfiles* enumProfiles = nullptr;
+            hr = profiles->EnumLanguageProfiles(0, &enumProfiles);
+            if (SUCCEEDED(hr) && enumProfiles) {
+                TF_LANGUAGEPROFILE tfProfile;
+                ULONG fetched = 0;
+                while (enumProfiles->Next(1, &tfProfile, &fetched) == S_OK) {
+                    if (tfProfile.langid == 0x0804 || tfProfile.langid == 0x0404) {
+                        char dbg[256];
+                        sprintf_s(dbg, "[ChineseIME] TSF Enum: langid=0x%04X, clsid=0x%08X, fActive=%d, guidProfile=%08X\n",
+                            tfProfile.langid, tfProfile.clsid.Data1, tfProfile.fActive ? 1 : 0,
+                            tfProfile.guidProfile.Data1);
+                        OutputDebugStringA(dbg);
+
+                        // fActive is TRUE for the currently active profile
+                        if (tfProfile.fActive && !typeFromTsf) {
+                            updateInputMethodType(tfProfile.langid, tfProfile.clsid, tfProfile.guidProfile);
+                            if (currentInputMethod_ != InputMethodType::UNKNOWN &&
+                                currentInputMethod_ != InputMethodType::ENGLISH &&
+                                currentInputMethod_ != InputMethodType::OTHER_CHINESE) {
+                                typeFromTsf = true;
+                                char dbg2[128];
+                                sprintf_s(dbg2, "[ChineseIME] TSF Enum: accepted active profile type=%d\n", (int)currentInputMethod_);
+                                OutputDebugStringA(dbg2);
+                                // Don't break - keep enumerating for debug info
+                            }
+                        }
+                    }
+                }
+                enumProfiles->Release();
+            }
+            profiles->Release();
         }
 
-        if (!detected) {
-            currentInputMethod_ = InputMethodType::OTHER_CHINESE;
-            DEBUG_LOG_SIMPLE(L"[ChineseIME] -> OTHER_CHINESE (no GUID match)\n");
+        if (comInitialized) CoUninitialize();
+    }
+
+    // Use description-based detection as additional check
+    if (!typeFromTsf && descType != InputMethodType::UNKNOWN) {
+        currentInputMethod_ = descType;
+        ImeStateManager::get().updateInputMethod(descType);
+        typeFromTsf = true;
+        char dbgDesc[128];
+        sprintf_s(dbgDesc, "[ChineseIME] queryCurrentInputMethod: used description-based detection -> %d\n", (int)descType);
+        OutputDebugStringA(dbgDesc);
+    }
+
+    if (!typeFromTsf) {
+        // Last resort: HKL-based detection
+        HKL hkl = GetKeyboardLayout(0);
+        InputMethodType hklType = detectInputMethodTypeFromHklSafe(hkl);
+        if (hklType != InputMethodType::UNKNOWN && hklType != InputMethodType::ENGLISH) {
+            currentInputMethod_ = hklType;
+            ImeStateManager::get().updateInputMethod(hklType);
         }
-    } else {
-        currentInputMethod_ = InputMethodType::ENGLISH;
-        DEBUG_LOG_SIMPLE(L"[ChineseIME] -> ENGLISH\n");
+
+        g_debugCounter++;
+        if (g_debugCounter % 600 == 0 || currentInputMethod_ != g_lastLoggedType) {
+            char dbg[128];
+            sprintf_s(dbg, "[ChineseIME] IME (HKL fallback): klName=%S, type=%d\n", klName, (int)currentInputMethod_);
+            OutputDebugStringA(dbg);
+            g_lastLoggedType = currentInputMethod_;
+        }
     }
 }
 

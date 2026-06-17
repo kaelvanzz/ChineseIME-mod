@@ -3,6 +3,7 @@
 #include <cstdint>
 #include <string>
 #include <vector>
+#include <windows.h>
 
 #ifdef _WIN32
 #ifdef CHINESEIME_EXPORTS
@@ -24,12 +25,13 @@ enum class InputMethodType {
     CANGJIE = 4,
     WUBI = 5,
     SUCHENG = 6,
+    SOGOU = 7,
     OTHER_CHINESE = 99
 };
 
 struct IMEState {
     bool isValid = false;
-    long hkl = 0;
+    LONG_PTR hkl = 0;
     InputMethodType inputMethodType = InputMethodType::UNKNOWN;
     bool imeOpen = false;
     bool chineseMode = false;

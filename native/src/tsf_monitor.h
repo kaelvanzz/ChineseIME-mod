@@ -34,6 +34,7 @@ public:
     bool initialize(IUnknown* pThreadMgr);
     void shutdown();
     void refreshState();
+    void pollUpdate();
 
     bool isChineseMode() const { return chineseMode_; }
     InputMethodType getInputMethodType() const { return currentInputMethod_; }
@@ -85,6 +86,7 @@ private:
     DWORD keyEventSinkCookie_ = TF_INVALID_COOKIE;
     DWORD profileSinkCookie_ = TF_INVALID_COOKIE;
     DWORD compartmentSinkCookie_ = TF_INVALID_COOKIE;
+    DWORD uiElementSinkCookie_ = TF_INVALID_COOKIE;
 
     bool chineseMode_ = false;
     TfEditCookie ecReadOnly_ = 0;
