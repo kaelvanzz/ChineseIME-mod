@@ -273,14 +273,16 @@ public class CandidateHud {
         return widths;
     }
 
-    public void onMouseMove(double mouseX, double mouseY, float scale) {
-        if (!this.visible) {
-            this.prevArrowHovered = false;
-            this.nextArrowHovered = false;
-            return;
-        }
-        int mx = (int) mouseX;
-        int my = (int) mouseY;
+    public void clearInput() {
+        this.candidates.clear();
+        this.composition = "";
+        this.selected = 0;
+        this.page = 0;
+        this.visible = false;
+    }
+
+    public void render(DrawContext ctx) {
+        if (!this.visible) return;
 
         MinecraftClient mc = MinecraftClient.getInstance();
         TextRenderer font = mc.textRenderer;
@@ -341,10 +343,9 @@ public class CandidateHud {
 
         for (int i = start; i < end; i++) {
             String cand = this.candidates.get(i);
-            int itemW = getItemWidth(i, scale);
             boolean isSelected = i == this.selected;
-            int localIndex = (i - start) + 1;
             int localIdx = i - start;
+
             int itemW = itemWidths[localIdx];
 
             int itemX = cx;
@@ -359,6 +360,7 @@ public class CandidateHud {
                     itemX + blueBarW, py + ph - highlightMargin, SEL_BAR);
             }
 
+            int localIndex = localIdx + 1;
             String numStr = String.valueOf(localIndex);
             int numW = font.getWidth(numStr);
             int candW = font.getWidth(cand);
@@ -376,13 +378,5 @@ public class CandidateHud {
             ctx.drawText(font, "<", arrowsX, textY, arrowColorLeft, false);
             ctx.drawText(font, ">", arrowsX + arrowW, textY, arrowColorRight, false);
         }
-    }
-
-    public void clearInput() {
-        this.candidates.clear();
-        this.composition = "";
-        this.selected = 0;
-        this.page = 0;
-        this.visible = false;
     }
 }

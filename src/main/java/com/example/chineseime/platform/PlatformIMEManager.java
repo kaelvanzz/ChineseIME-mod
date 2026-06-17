@@ -144,14 +144,6 @@ public class PlatformIMEManager {
         }
     }
 
-    public void prevPage() {
-        hud.prevPage();
-    }
-
-    public void nextPage() {
-        hud.nextPage();
-    }
-
     public String confirmSelection() {
         InputMode mode = getDetectedInputMode();
         boolean useVertical = (mode == InputMode.CANGJIE || mode == InputMode.ZHUYIN || mode == InputMode.SUCHENG);

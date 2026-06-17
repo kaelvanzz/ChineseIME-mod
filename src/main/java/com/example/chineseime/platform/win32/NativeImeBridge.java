@@ -6,6 +6,7 @@ import com.sun.jna.Callback;
 import com.sun.jna.Memory;
 import com.sun.jna.Native;
 import com.sun.jna.Pointer;
+import com.sun.jna.WString;
 import com.sun.jna.win32.StdCallLibrary;
 import com.sun.jna.win32.W32APIOptions;
 import java.io.InputStream;
@@ -296,6 +297,7 @@ private static void loadNative() {
         int GetCapsLockState();
         int GetKeyboardStateForPolling(int vKey);
         void RefreshImeState();
+        int GetInputMethodType();
         void FreeBuffer(Pointer ptr);
         long GetKeyboardLayoutHKL();
         void SetCallbacks(CandidateUpdateCallback candidateUpdate,
