@@ -3,6 +3,7 @@
 #include "ime_detector.h"
 #include "sta_thread.h"
 #include "win_event_bridge.h"
+#include "ime_callback.h"
 #include <comdef.h>
 #include <algorithm>
 #include <msctf.h>

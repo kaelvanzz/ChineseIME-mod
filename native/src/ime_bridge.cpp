@@ -12,6 +12,7 @@
 #include <thread>
 #include <atomic>
 #include <future>
+#include <algorithm>
 #include <debugapi.h>
 
 #pragma comment(lib, "imm32.lib")
@@ -480,7 +481,7 @@ __declspec(dllexport) int GetCompositionString(wchar_t* buffer, int bufferSize) 
 
     auto state = chineseime::ImeStateManager::get().getSnapshot();
     if (!state.composition.empty()) {
-        int len = (min)(bufferSize - 1, (int)state.composition.size());
+        int len = std::min(bufferSize - 1, (int)state.composition.size());
         wcsncpy_s(buffer, bufferSize, state.composition.c_str(), len);
         buffer[len] = 0;
         return len;
@@ -493,7 +494,7 @@ __declspec(dllexport) int GetCandidate(int index, wchar_t* buffer, int bufferSiz
     auto state = chineseime::ImeStateManager::get().getSnapshot();
     if (index >= 0 && index < (int)state.candidates.size()) {
         const std::wstring& cand = state.candidates[index];
-        int len = (min)(bufferSize - 1, (int)cand.size());
+        int len = std::min(bufferSize - 1, (int)cand.size());
         wcsncpy_s(buffer, bufferSize, cand.c_str(), len);
         buffer[len] = 0;
         return len;
