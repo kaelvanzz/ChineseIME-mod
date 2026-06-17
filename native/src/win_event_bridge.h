@@ -30,6 +30,9 @@
         HWND getTargetWindow() const { return targetWindow_; }
         const EventCallbacks& getCallbacks() const { return callbacks_; }
 
+        void fireCandidateCallback(const wchar_t* composition, const wchar_t** candidates, int count, int selectedIndex);
+        void fireImeStateCallback(int imeType, int chineseMode);
+
         void processImeComposition(HWND hwnd, LPARAM lParam);
         void processImeEndComposition(HWND hwnd);
         void processImeNotify(WPARAM wParam, LPARAM lParam);

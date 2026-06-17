@@ -88,6 +88,7 @@ private:
     DWORD compartmentSinkCookie_ = TF_INVALID_COOKIE;
     DWORD uiElementSinkCookie_ = TF_INVALID_COOKIE;
 
+    ITfUIElementMgr* uiElementMgr_ = nullptr;
     bool chineseMode_ = false;
     TfEditCookie ecReadOnly_ = 0;
 };

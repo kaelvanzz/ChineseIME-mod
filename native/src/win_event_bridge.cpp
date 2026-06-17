@@ -109,6 +109,18 @@ void WinEventBridge::readCompositionCursor(HIMC himc) {
     }
 }
 
+void WinEventBridge::fireCandidateCallback(const wchar_t* composition, const wchar_t** candidates, int count, int selectedIndex) {
+    if (callbacks_.candidateCallback) {
+        callbacks_.candidateCallback(candidates, count, selectedIndex);
+    }
+}
+
+void WinEventBridge::fireImeStateCallback(int imeType, int chineseMode) {
+    if (callbacks_.imeChangeCallback) {
+        callbacks_.imeChangeCallback(imeType, chineseMode);
+    }
+}
+
 void WinEventBridge::readCandidates(HIMC himc) {
     if (!callbacks_.candidateCallback) return;
 

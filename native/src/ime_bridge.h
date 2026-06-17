@@ -74,20 +74,6 @@ CHINESEIME_API void SetEventCallbacks(
     void* imeChangeCallback,
     void* keyboardCallback);
 
-// Event-driven API (WndProc hook for IME events)
-CHINESEIME_API void HookWindowProc(void* hwnd);
-CHINESEIME_API void UnhookWindowProc(void);
-CHINESEIME_API void RefreshCandidates(void);
-CHINESEIME_API int IsWindowHooked(void);
-
-// Event callbacks registration (for event-driven mode)
-CHINESEIME_API void SetEventCallbacks(
-    void* preeditCallback,
-    void* commitCallback,
-    void* candidateCallback,
-    void* imeChangeCallback,
-    void* keyboardCallback);
-
 #ifdef __cplusplus
 }
 #endif

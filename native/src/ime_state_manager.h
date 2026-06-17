@@ -28,6 +28,7 @@ public:
     bool checkLayoutChanged();
     void clearLayoutChanged();
     bool isChineseInputMethod() const;
+    void updateFromHkl(LONG_PTR hkl);
 
 private:
     ImeStateManager() = default;

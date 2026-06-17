@@ -5,7 +5,6 @@
 #include "ime_callback.h"
 #include "sta_thread.h"
 #include "win_event_bridge.h"
-#include "ime_callback.h"
 #include <windows.h>
 #include <imm.h>
 #include <string>
@@ -50,6 +49,14 @@ std::unique_ptr<chineseime::Imm32Monitor> g_imm32Monitor;
 std::atomic<bool> g_tsfInitialized{false};
 std::atomic<bool> g_imm32Initialized{false};
 static DWORD g_dwTfClientId = TF_CLIENTID_NULL;
+static HWND g_targetWindow = nullptr;
+static HWND g_hwnd = nullptr;
+static HIMC g_himc = nullptr;
+static HHOOK g_callWndProcHook = nullptr;
+static WNDPROC g_originalWndProc = nullptr;
+static std::atomic<bool> g_pollingRunning{false};
+static std::thread g_pollingThread;
+static void (*g_javaCandidates)(const wchar_t**, int, int) = nullptr;
 
 static inline bool isChinese(wchar_t c) {
     return (c >= 0x4E00 && c <= 0x9FFF) || (c >= 0x3400 && c <= 0x4DBF);
@@ -126,7 +133,8 @@ void PollKeyboardState() {
     chineseime::ImeStateManager::get().updateKeyboardState(capsLockOn, shiftPressed);
 }
 
-// ── Message hook procedures ──
+void PollIMEState() {
+    auto& mgr = chineseime::ImeStateManager::get();
 
     HWND fgWnd = g_targetWindow;
     if (!fgWnd) fgWnd = GetForegroundWindow();
@@ -166,8 +174,6 @@ void PollKeyboardState() {
     if (fgThreadId != pollThreadId) {
         attached = AttachThreadInput(pollThreadId, fgThreadId, TRUE);
     }
-    return CallNextHookEx(g_callWndProcHook, code, wParam, lParam);
-}
 
     HKL hkl = GetKeyboardLayout(0);
     chineseime::InputMethodType detectedType = chineseime::InputMethodType::UNKNOWN;
@@ -250,6 +256,31 @@ void PollKeyboardState() {
 
     ImmReleaseContext(fgWnd, himc);
 }
+
+} // anonymous namespace
+
+void setJavaCallbacks(
+    void(*preedit)(const wchar_t*, int, int),
+    void(*commit)(const wchar_t*),
+    void(*candidates)(const wchar_t**, int, int),
+    void(*imeChange)(int, int))
+{
+}
+
+namespace chineseime {
+
+void onImeStateChanged(int imeType, int chineseMode) {
+    WinEventBridge::get().fireImeStateCallback(imeType, chineseMode);
+}
+
+void onCandidateChanged(const wchar_t* composition, const wchar_t** candidates, int count, int selectedIndex) {
+    WinEventBridge::get().fireCandidateCallback(composition, candidates, count, selectedIndex);
+}
+
+void onKeyboardStateChanged(int capsLock, int shiftMode) {
+}
+
+} // namespace chineseime
 
 // ── Exported DLL functions ──
 
@@ -368,10 +399,8 @@ __declspec(dllexport) int HookWindowProcRaw(ULONG_PTR hwnd) {
             PollKeyboardState();
             PollIMEState();
 
-__declspec(dllexport) int InstallMessageHook(ULONG_PTR hwnd) {
-    if (!hwnd) return 0;
-    HWND h = (HWND)hwnd;
-    if (!IsWindow(h)) return 0;
+            auto changes = chineseime::ImeStateManager::get().checkChanges();
+            auto state = chineseime::ImeStateManager::get().getSnapshot();
 
             if (changes.inputMethodChanged || changes.chineseModeChanged) {
                 char buf[256];
@@ -414,16 +443,6 @@ __declspec(dllexport) int InstallMessageHook(ULONG_PTR hwnd) {
         DEBUG_LOG_SIMPLE("[ChineseIME] Polling thread stopped\n");
     });
 
-__declspec(dllexport) void SetEventCallbacks(
-    void* preedit, void* commit, void* candidates, void* imeChange, void* keyboard) {
-    setJavaCallbacks(
-        (void(*)(const wchar_t*, int, int))preedit,
-        (void(*)(const wchar_t*))commit,
-        (void(*)(const wchar_t**, int, int))candidates,
-        (void(*)(int, int))imeChange
-    );
-}
-
 __declspec(dllexport) void StopTsfListen(void) {
     g_pollingRunning.store(false);
 
@@ -431,39 +450,13 @@ __declspec(dllexport) void StopTsfListen(void) {
         std::thread tmpThread = std::move(g_pollingThread);
         tmpThread.detach();
     }
-
-    HWND hwndToTry = g_hwnd;
-    if (!hwndToTry || !IsWindow(hwndToTry)) {
-        hwndToTry = GetForegroundWindow();
-    }
-    if (!hwndToTry) return 0;
-
-    HIMC himc = ImmGetContext(hwndToTry);
-    if (!himc) {
-        HWND fgWnd = GetForegroundWindow();
-        if (fgWnd && fgWnd != hwndToTry) {
-            himc = ImmGetContext(fgWnd);
-            if (himc) {
-                hwndToTry = fgWnd;
-            }
-        }
-        if (!himc) return 0;
-    }
-
-    LONG len = ImmGetCompositionStringW(himc, GCS_COMPSTR, NULL, 0);
-    if (len > 0 && len <= bufferSize * (LONG)sizeof(wchar_t)) {
-        ImmGetCompositionStringW(himc, GCS_COMPSTR, buffer, len);
-        ImmReleaseContext(hwndToTry, himc);
-        return len / sizeof(wchar_t);
-    }
-    ImmReleaseContext(hwndToTry, himc);
-    return 0;
 }
 
 __declspec(dllexport) int IsTsfListening(void) {
     return g_tsfInitialized.load() ? 1 : 0;
 }
 
+__declspec(dllexport) int GetCandidateCount(void) {
     if (!g_hwnd) return 0;
     HIMC himc = ImmGetContext(g_hwnd);
     if (!himc) return 0;
@@ -477,34 +470,34 @@ __declspec(dllexport) int IsTsfListening(void) {
         }
     }
     ImmReleaseContext(g_hwnd, himc);
-    return count;
+    return (int)count;
 }
 
 __declspec(dllexport) int GetCompositionString(wchar_t* buffer, int bufferSize) {
     if (!buffer || bufferSize <= 0) return 0;
 
-    {
-        auto state = chineseime::ImeStateManager::get().getSnapshot();
-        if (index >= 0 && index < (int)state.candidates.size()) {
-            const std::wstring& cand = state.candidates[index];
-            int len = (int)cand.size();
-            if (len >= bufferSize) len = bufferSize - 1;
-            wcsncpy_s(buffer, bufferSize, cand.c_str(), len);
-            buffer[len] = 0;
-            return len;
-        }
+    auto state = chineseime::ImeStateManager::get().getSnapshot();
+    if (!state.composition.empty()) {
+        int len = (min)(bufferSize - 1, (int)state.composition.size());
+        wcsncpy_s(buffer, bufferSize, state.composition.c_str(), len);
+        buffer[len] = 0;
+        return len;
     }
-
-__declspec(dllexport) int GetCandidateCount(void) {
-    return (int)chineseime::ImeStateManager::get().getSnapshot().candidates.size();
+    return 0;
 }
 
 __declspec(dllexport) int GetCandidate(int index, wchar_t* buffer, int bufferSize) {
     if (!buffer || bufferSize <= 0) return 0;
     auto state = chineseime::ImeStateManager::get().getSnapshot();
-    if (!state.candidates.empty()) {
-        return state.selectedIndex;
+    if (index >= 0 && index < (int)state.candidates.size()) {
+        const std::wstring& cand = state.candidates[index];
+        int len = (min)(bufferSize - 1, (int)cand.size());
+        wcsncpy_s(buffer, bufferSize, cand.c_str(), len);
+        buffer[len] = 0;
+        return len;
     }
+    return 0;
+}
 
 __declspec(dllexport) int GetSelectedCandidateIndex(void) {
     return chineseime::ImeStateManager::get().getSnapshot().selectedIndex;

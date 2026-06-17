@@ -1,5 +1,7 @@
 #pragma once
 
+#include "common.h"
+
 #ifdef _WIN32
 
 #ifdef __cplusplus
@@ -15,5 +17,20 @@ typedef void (__cdecl* KeyboardCallback)(int capsLock, int shiftMode);
 #ifdef __cplusplus
 }
 #endif
+
+namespace chineseime {
+
+void onImeStateChanged(int imeType, int chineseMode);
+void onCandidateChanged(const wchar_t* composition, const wchar_t** candidates, int count, int selectedIndex);
+void onKeyboardStateChanged(int capsLock, int shiftMode);
+
+} // namespace chineseime
+
+void setJavaCallbacks(
+    void(*preedit)(const wchar_t*, int, int),
+    void(*commit)(const wchar_t*),
+    void(*candidates)(const wchar_t**, int, int),
+    void(*imeChange)(int, int)
+);
 
 #endif

@@ -76,6 +76,78 @@ static InputMethodType detectInputMethodTypeFromHklSafe(HKL hkl) {
     return type;
 }
 
+class TsfEditSession : public ITfEditSession {
+public:
+    TsfEditSession(ITfContext* pic, std::vector<std::wstring>* candidates, bool* success)
+        : pic_(pic), candidates_(candidates), success_(success), refCount_(1) {}
+
+    STDMETHODIMP QueryInterface(REFIID riid, void** ppv) override {
+        if (!ppv) return E_POINTER;
+        if (riid == IID_IUnknown || riid == IID_ITfEditSession) {
+            *ppv = static_cast<ITfEditSession*>(this);
+            AddRef();
+            return S_OK;
+        }
+        *ppv = nullptr;
+        return E_NOINTERFACE;
+    }
+
+    STDMETHODIMP_(ULONG) AddRef() override {
+        return InterlockedIncrement(&refCount_);
+    }
+
+    STDMETHODIMP_(ULONG) Release() override {
+        LONG count = InterlockedDecrement(&refCount_);
+        if (count == 0) {
+            delete this;
+        }
+        return count;
+    }
+
+    STDMETHODIMP DoEditSession(TfEditCookie ecReadOnly) override {
+        if (!pic_ || !candidates_) return E_FAIL;
+
+        ITfProperty* prop = nullptr;
+        HRESULT hr = pic_->GetProperty(GUID_PROP_CANDIDATE, &prop);
+        if (FAILED(hr) || !prop) {
+            if (success_) *success_ = false;
+            return S_OK;
+        }
+
+        IEnumTfRanges* enumRanges = nullptr;
+        hr = prop->EnumRanges(ecReadOnly, &enumRanges, nullptr);
+        prop->Release();
+        if (FAILED(hr) || !enumRanges) {
+            if (success_) *success_ = false;
+            return S_OK;
+        }
+
+        ITfRange* range = nullptr;
+        while (enumRanges->Next(1, &range, nullptr) == S_OK) {
+            if (range) {
+                wchar_t buffer[64];
+                ULONG fetched = 0;
+                hr = range->GetText(ecReadOnly, 0, buffer, 63, &fetched);
+                if (SUCCEEDED(hr) && fetched > 0) {
+                    buffer[fetched] = 0;
+                    candidates_->push_back(buffer);
+                }
+                range->Release();
+            }
+        }
+        enumRanges->Release();
+
+        if (success_) *success_ = !candidates_->empty();
+        return S_OK;
+    }
+
+private:
+    ITfContext* pic_;
+    std::vector<std::wstring>* candidates_;
+    bool* success_;
+    LONG refCount_;
+};
+
 TsfMonitor::TsfMonitor() {
     DEBUG_LOG_SIMPLE(L"[ChineseIME] TsfMonitor created\n");
 }
@@ -508,6 +580,7 @@ void TsfMonitor::updateCache() {
         if (getCandidateList(ctx, candidates, selectedIndex)) {
             candidatesFound = true;
         }
+        char dbg[256];
         sprintf_s(dbg, "[ChineseIME] updateCache: TSF candidatesFound=%d, candCnt=%d\n", 
             candidatesFound ? 1 : 0, (int)candidates.size());
         OutputDebugStringA(dbg);
@@ -882,26 +955,6 @@ void TsfMonitor::queryCurrentInputMethod() {
             g_lastLoggedType = currentInputMethod_;
         }
     }
-}
-
-void TsfMonitor::queryCurrentInputMethod() {
-    ITfInputProcessorProfiles* profiles = nullptr;
-    HRESULT hr = CoCreateInstance(CLSID_TF_InputProcessorProfiles, nullptr,
-        CLSCTX_INPROC_SERVER, IID_ITfInputProcessorProfiles, (void**)&profiles);
-    if (FAILED(hr)) return;
-
-    LANGID langid;
-    CLSID clsid;
-    GUID guidProfile;
-    hr = profiles->GetActiveLanguageProfile(clsid, &langid, &guidProfile);
-    if (SUCCEEDED(hr)) {
-        updateInputMethodType(langid, clsid, guidProfile);
-        char buf[256];
-        sprintf_s(buf, "[ChineseIME] queryCurrentInputMethod: langid=0x%04x, type=%d\n",
-            langid, (int)currentInputMethod_);
-        OutputDebugStringA(buf);
-    }
-    profiles->Release();
 }
 
 } // namespace chineseime
