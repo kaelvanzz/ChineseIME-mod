@@ -2,7 +2,7 @@
 #include "ime_state_manager.h"
 #include "tsf_monitor.h"
 #include "imm32_monitor.h"
-#include "jni_callback.h"
+#include "ime_callback.h"
 #include "sta_thread.h"
 #include "win_event_bridge.h"
 #include "ime_callback.h"
