@@ -10,21 +10,6 @@ ImeStateManager& ImeStateManager::get() {
     return instance;
 }
 
-InputMethodType detectInputMethodTypeFromImeId(WORD imeId, LANGID langId) {
-    if (langId != 0x0804 && langId != 0x0404 && langId != 0x0C04 && langId != 0x1404) {
-        return InputMethodType::ENGLISH;
-    }
-    switch (imeId) {
-    case 0x0000: return InputMethodType::PINYIN;
-    case 0x0001: case 0x0010: case 0xE010: case 0xE020: return InputMethodType::PINYIN;
-    case 0x0002: case 0xE011: return InputMethodType::WUBI;
-    case 0x0003: case 0xE001: return InputMethodType::ZHUYIN;
-    case 0x0004: case 0xE002: return InputMethodType::CANGJIE;
-    case 0x0005: case 0xE003: return InputMethodType::SUCHENG;
-    default: return InputMethodType::OTHER_CHINESE;
-    }
-}
-
 void ImeStateManager::updateInputMethod(InputMethodType type) {
     std::lock_guard<std::mutex> lock(mutex_);
     if (state_.inputMethodType != type) {
