@@ -11,6 +11,7 @@ src/sta_thread.cpp
 src/ime_state_manager.cpp
 src/tsf_monitor.cpp
 src/imm32_monitor.cpp
+src/ime_detector.cpp
 src/win_event_bridge.cpp
 )
 
