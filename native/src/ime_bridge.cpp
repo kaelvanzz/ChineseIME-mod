@@ -304,10 +304,10 @@ __declspec(dllexport) int StartListen(void* hwnd) {
         chineseime::ImeStateManager::get().updateImeOpen(isChineseLang);
     }
 
-    g_hwnd = h;
-    g_himc = ImmGetContext(h);
+    g_hwnd = g_targetWindow;
+    g_himc = ImmGetContext(g_targetWindow);
     if (g_himc) {
-        ImmReleaseContext(h, g_himc);
+        ImmReleaseContext(g_targetWindow, g_himc);
     } else {
         g_himc = ImmCreateContext();
     }
@@ -442,6 +442,8 @@ __declspec(dllexport) int HookWindowProcRaw(ULONG_PTR hwnd) {
         }
         DEBUG_LOG_SIMPLE("[ChineseIME] Polling thread stopped\n");
     });
+    return 1;
+}
 
 __declspec(dllexport) void StopTsfListen(void) {
     g_pollingRunning.store(false);
@@ -527,15 +529,6 @@ __declspec(dllexport) int GetShiftMode(void) {
     return inShiftMode ? 1 : 0;
 }
 
-static int detectTypeFromHklInternal(HKL hkl) {
-    if (!hkl) return 0;
-    using namespace chineseime;
-    DWORD_PTR val = (DWORD_PTR)hkl;
-    LANGID langId = LOWORD(val);
-    if (!IsChineseLangId(langId)) return static_cast<int>(InputMethodType::ENGLISH);
-    return static_cast<int>(detectInputMethodTypeFromHkl(hkl));
-}
-
 __declspec(dllexport) int GetKeyboardStateForPolling(int vKey) {
     BYTE keyboardState[256];
     if (GetKeyboardState(keyboardState)) {
@@ -563,35 +556,6 @@ __declspec(dllexport) const char* GetDllVersion(void) {
 
 __declspec(dllexport) int HasLayoutChanged(void) {
     return chineseime::ImeStateManager::get().checkLayoutChanged() ? 1 : 0;
-}
-
-__declspec(dllexport) void RefreshCandidates() {
-    if (g_hwnd) {
-        HIMC himc = ImmGetContext(g_hwnd);
-        if (himc) {
-            DWORD bufSize = ImmGetCandidateListW(himc, 0, NULL, 0);
-            if (bufSize > 0) {
-                std::vector<char> buf(bufSize);
-                CANDIDATELIST* candList = (CANDIDATELIST*)buf.data();
-                if (ImmGetCandidateListW(himc, 0, candList, bufSize) > 0 && candList->dwCount > 0) {
-                    std::vector<std::wstring> cands;
-                    DWORD count = candList->dwCount > 9 ? 9 : candList->dwCount;
-                    for (DWORD i = 0; i < count; i++) {
-                        wchar_t* pStr = (wchar_t*)(buf.data() + candList->dwOffset[i]);
-                        cands.push_back(pStr);
-                    }
-                    std::vector<const wchar_t*> ptrs;
-                    for (auto& c : cands) ptrs.push_back(c.c_str());
-                    int selIdx = (int)candList->dwSelection;
-                    if (selIdx >= (int)count) selIdx = (int)count - 1;
-                    if (g_javaCandidates) {
-                        g_javaCandidates(ptrs.data(), (int)ptrs.size(), selIdx);
-                    }
-                }
-            }
-            ImmReleaseContext(g_hwnd, himc);
-        }
-    }
 }
 
 __declspec(dllexport) void SetEventCallbacks(
