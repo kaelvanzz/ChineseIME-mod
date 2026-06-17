@@ -9,7 +9,6 @@ add_library(chineseime_native SHARED
 src/ime_bridge.cpp
 src/sta_thread.cpp
 src/ime_state_manager.cpp
-src/jni_callback.cpp
 src/tsf_monitor.cpp
 src/imm32_monitor.cpp
 src/win_event_bridge.cpp
