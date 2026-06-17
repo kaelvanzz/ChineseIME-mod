@@ -16,9 +16,16 @@ public abstract class ChatScreenMixin {
         if (instance == null) return;
 
         if (button == 0) {
-            float scale = instance.getCandidateHud().getScaleForClick();
-            if (instance.getCandidateHud().handleClick(mouseX, mouseY, scale)) {
-                cir.setReturnValue(true);
+            if (instance.getImeManager().isVerticalLayout()) {
+                float scale = instance.getVerticalCandidateHud().getScaleForClick();
+                if (instance.getVerticalCandidateHud().handleClick(mouseX, mouseY, scale)) {
+                    cir.setReturnValue(true);
+                }
+            } else {
+                float scale = instance.getCandidateHud().getScaleForClick();
+                if (instance.getCandidateHud().handleClick(mouseX, mouseY, scale)) {
+                    cir.setReturnValue(true);
+                }
             }
         }
     }

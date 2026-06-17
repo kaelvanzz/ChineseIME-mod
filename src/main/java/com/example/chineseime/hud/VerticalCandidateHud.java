@@ -1,6 +1,5 @@
 package com.example.chineseime.hud;
 
-import com.example.chineseime.engine.InputMode;
 import java.util.ArrayList;
 import java.util.List;
 import net.minecraft.client.MinecraftClient;
@@ -15,7 +14,6 @@ public class VerticalCandidateHud {
     private int perPage = 9;
     private boolean visible = false;
     private int x, y, width, height;
-    private InputMode currentInputMethod = InputMode.CANGJIE;
 
     private static final int BG = 0xB3000000;
     private static final int SEL_BG = 0x66B1B4B6;
@@ -63,14 +61,6 @@ public class VerticalCandidateHud {
         } else {
             this.visible = !this.candidates.isEmpty() || !this.composition.isEmpty();
         }
-    }
-
-    /**
-     * Update candidates with selection preservation and InputMethodType tracking (Grok fix)
-     */
-    public void updateKeepSelection(List<String> candidates, String composition, int selectedIndex, int page, InputMode inputMethodType) {
-        this.currentInputMethod = inputMethodType != null ? inputMethodType : InputMode.CANGJIE;
-        this.updateCandidatesKeepSelection(candidates, composition, selectedIndex, page);
     }
 
     public void clear() {
@@ -137,7 +127,6 @@ public class VerticalCandidateHud {
     public int getWidth() { return this.width; }
     public int getHeight() { return this.height; }
     public int getPerPage() { return this.perPage; }
-    public InputMode getCurrentInputMethod() { return this.currentInputMethod; }
     public void setSelectedIndex(int selected) { this.selected = selected; }
     public void setPage(int page) { this.page = page; }
     public void setVisible(boolean visible) { this.visible = visible; }
@@ -168,12 +157,11 @@ public class VerticalCandidateHud {
         int blueBarW = (int)(BLUE_BAR_W_1080P / scale);
 
         MinecraftClient mc = MinecraftClient.getInstance();
-        int scaledW = mc.getWindow().getScaledWidth();
         int scaledH = mc.getWindow().getScaledHeight();
         int chatInputTop = scaledH - 22 - 14;
         int panelH = compoH + this.perPage * itemH + pad * 2;
 
-        int panelX = scaledW - panelW - margin;
+        int panelX = scaledH - panelW - margin;
         int panelY = chatInputTop - 2 - panelH;
 
         if (mx < panelX || mx > panelX + panelW) return false;
@@ -225,16 +213,16 @@ public class VerticalCandidateHud {
         int my = (int) mouseY;
 
         MinecraftClient mc = MinecraftClient.getInstance();
-        int scaledW = mc.getWindow().getScaledWidth();
         int scaledH = mc.getWindow().getScaledHeight();
         int chatInputTop = scaledH - 22 - 14;
         int panelW = (int)(WIDTH_1080P / scale);
         int margin = (int)(MARGIN_1080P / scale);
-        int pad = (int)(PAD_1080P / scale);
         int compoH = this.composition.isEmpty() ? 0 : (int)(COMPO_HEIGHT_1080P / scale);
         int itemH = (int)(ITEM_HEIGHT_1080P / scale);
+        int pad = (int)(PAD_1080P / scale);
         int panelH = compoH + this.perPage * itemH + pad * 2;
-        int panelX = scaledW - panelW - margin;
+
+        int panelX = scaledH - panelW - margin;
         int panelY = chatInputTop - 2 - panelH;
 
         this.prevArrowHovered = false;

@@ -532,7 +532,7 @@ public class ConfigScreen extends Screen {
             if (!currentCapturedKeys.contains(keyCode)) {
                 currentCapturedKeys.add(keyCode);
             }
-            int idx = getHoveredItem(this.mouseX, this.mouseY);
+            int idx = getHoveredItem(mouseX, mouseY);
             if (idx >= 0) {
                 Item item = items.get(idx);
                 if (item.type == ItemType.SHORTCUT_TOGGLE_IME) {

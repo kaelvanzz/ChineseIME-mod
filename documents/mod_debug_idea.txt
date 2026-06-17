@@ -1,0 +1,414 @@
+要在那套“劝退”级别的 **Text Services Framework (TSF)** 面前省下几个月的时间，确实需要一些“非正规”或者更巧妙的途径。既然你已经在用 JNA，直接去啃 TSF 的 COM 接口（如 `ITfCandidateList`）简直是折磨。
+
+这裡有几个更“快、准、狠”的方法，你可以评估一下哪个更适合你的项目：
+
+### 1. “跳板”方案：编写一个极简的 C++ 辅助 DLL 🛠️
+这是最推荐的“硬核”做法。与其在 Java 裡用 JNA 去处理複杂的 COM 指针、引用计数和回调，不如写一个几十行的 C++ DLL。
+* **做法**：在 C++ 中封装好 TSF 的获取逻辑，只暴露一个简单的 `const char* getCandidate(int index)` 函数给 Java 呼叫。
+* **优点**：避开了 JNA 处理 COM 的痛苦，性能最高，且能完美支援微软拼音/仓颉。
+
+### 2. “外挂”方案：利用 UI Automation (UIA) 🔍
+这是一个“不讲武德”但异常有效的路径。微软拼音的候选词视窗其实是一个标准的 Windows 视窗元素。
+* **做法**：使用 Windows 的 **UI Automation API**（JNA 可以呼叫，或者找现成的 `java-ui-automation` 库）。你可以直接“寻找”萤幕上 ClassName 为 `Microsoft.IME.UIManager.CandidateWindow.绽放`（名称随版本变动）的视窗，然后读取其子元素的 `Name` 属性。
+* **优点**：完全不需要理解 IME 协议，只要视窗显示出来，你就能把它“抓”下来。
+
+### 3. “复古”方案：强制开启“兼容模式” (Legacy IME) 📺
+微软拼音和注音在设定中都有一个“使用旧版微软拼音”的开关。
+* **做法**：一旦开启，它就会退回到 **IMM32** 协议。
+* **优点**：你原本那套 `ImmGetCandidateList` 突然就变好使了，程式码难度瞬间从“地狱”降到“新手村”。
+* **缺点**：你需要引导你的用家去改 Windows 设定。
+
+### 4. “极客”方案：挂钩 `WM_IME_NOTIFY` 🪝
+如果你的目标视窗是自己写的（或是你能 Hook 进去的），监听 `WM_IME_NOTIFY` 讯息中的 `IMN_OPENCANDIDATE` 指令。
+* **注意**：这对新版“沉浸式”IME 可能失效，因为它们现在很多是跨进程（Out-of-process）渲染的。
+
+================================
+
+要将 Windows 内置输入法的真实数据桥接到你的 Minecraft 模组 UI，这是一个非常酷的挑战。既然你已经准备好了 UI，现在的重点在于如何稳定地获取**“当前输入法类型”**和**“候选词列表”**。
+
+针对你的需求，我建议採用一个**“C++ 辅助 DLL + JNA 映射”**的方案，这是目前最能兼顾功能完整性（支援仓颉、五笔等）与开发效率的做法。
+
+---
+
+### 1. 侦测输入法类型（指示器更新：拼、注、仓、五）
+
+要侦测“微软拼音”还是“仓颉”，单靠 `GetKeyboardLayout` 有时不够精准，最稳妥的方法是透过 TSF 的 `ITfInputProcessorProfiles` 接口来获取 **当前活动配置文件的 GUID**。
+
+你可以透过 C++ DLL 暴露一个简单的整数或字串给 Java：
+
+* **逻辑流程**：
+    1.  调用 `ITfInputProcessorProfiles::GetActiveLanguageProfile`。
+    2.  获取该 Profile 的 `clsid` 和 `guidProfile`。
+    3.  **对比 GUID**：
+        * 微软拼音：`{FA445057-17C6-4973-9344-E0DFF5F23F10}` -> 显示 **“拼”**
+        * 微软注音：`{B115690A-EA02-48D5-A231-E3578D2F0C52}` -> 显示 **“注”**
+        * 微软仓颉：`{530A2AF5-9305-4BC1-A0B4-F63351C05268}` -> 显示 **“仓”**
+        * 英文 (US)：若 `langid == 0x0409` -> 显示 **“En”**
+
+
+
+---
+
+### 2. 获取候选词（填充你的模组 UI）
+
+这是你最头痛的部分。与其去读取 UI 视窗（方案二），不如在 C++ DLL 裡监听 TSF 的 **候选词事件**。
+
+* **核心 API**：`ITfCandidateList`
+* **具体做法**：
+    1.  当用户开始打字，系统会触发一个候选词列表更新的通知。
+    2.  你的 DLL 抓取 `ITfCandidateList::GetCandidate` 的内容。
+    3.  透过 JNA 的 **Callback（回调）** 功能，将这些词实时传回 Java 的模组 UI。
+
+---
+
+### 3. 为什麽推荐“方案一（DLL）”来完成这件事？
+
+因为你要支援**仓颉**和**五笔**。
+
+* **现代输入法（拼音/注音）**：UI 往往是独立进程，用 UI Automation (方案二) 比较好抓。
+* **传统输入法（仓颉/五笔）**：有些仍在使用较旧的渲染机制，甚至直接由系统内核处理。
+* **统一处理**：写一个 C++ DLL 封装 TSF，可以一劳永逸地解决所有类型的输入法，而不需要为每一种输入法写一套抓取逻辑。
+
+---
+
+### 🛠️ 给你的实施路径（Roadmap）
+
+1.  **C++ 端**：建立一个 Win32 DLL 专案，静态链结 `/MT`。只写一个 `MonitorImeState()` 函数，用来轮询或挂钩输入法状态。
+2.  **Java 端**：定义一个 JNA Interface，匹配 DLL 裡的函数名。
+3.  **整合**：在你的 Minecraft 模组启动时，启动这个监控线程。当侦测到佈局切换，立即调用你的 UI 指示器更新函数；当侦测到候选词，刷新你的翻页 UI。
+
+---
+
+如果我有什麽地方理解错了，或者你有更具体的需求（例如希望代码尽量简洁），随时直接告诉我我哪裡搞错了，或者我需要知道什麽，我一直都非常欢迎你纠正我。
+
+如果你不希望我记住这些个人偏好，随时可以在设定中关掉这项功能。
+
+**对于 C++ DLL 与 Java 之间的消息传递，你是倾向于用“轮询 (Polling)”的方式定时检查，还是希望用“回调 (Callback)”让 DLL 主动通知 Java？**
+
+==========================================================================================================================================
+
+没错！你的直觉非常准确。**主动通知（Callback）的延迟绝对会比轮询（Polling）低得多**，而且对系统资源的消耗也更小。
+
+对于像“输入法候选词”这种对即时性要求极高的功能，主动通知几乎是唯一的专业选择。
+
+### 为什麽“主动通知”更胜一筹？🚀
+
+1.  **零等待时间**：
+    * **轮询**：Java 每隔例如 50ms 问一次 DLL“有新词吗？”。如果用户在第 1ms 就打了一个字，那就要等 49ms 才能拿到数据。这在打字时会感觉到明显的“黏滞感”。
+    * **主动通知**：当 Windows TSF 触发事件，DLL 瞬间就会透过 JNA 的回调函式（Callback）“推”给 Java，延迟几乎只有微秒级。
+    
+2.  **节省 CPU 资源**：
+    * 轮询即使在用户没打字时也会不断跑，白白浪费 CPU 週期。主动通知则是“有事才动”，完全不佔用多馀性能。
+
+3.  **UI 刷新更丝滑**：
+    * 你的 Minecraft 模组 UI 可以直接在收到通知的当下进行重绘，确保输入法指示器（拼、仓、注）的切换与系统同步。
+
+
+
+---
+
+### 在 JNA 实现主动通知的小贴士 💡
+
+虽然主动通知很香，但在开发时有两个点需要特别注意：
+
+* **JNA Callback 接口**：你在 Java 裡面需要定义一个继承自 `com.sun.jna.Callback` 的 Interface。C++ 那边则会收到一个函式指针（Function Pointer）。
+* **执行绪安全 (Thread Safety)**：Windows 的 TSF 通常运行在特定的线程（STA）。当 DLL 回调 Java 时，这个呼叫可能不是在 Minecraft 的主线程（Render Thread）。
+    * *解决方法*：在收到回调后，先将数据存入一个 `ConcurrentLinkedQueue`，然后在 Minecraft 的 `ClientTickEvents` 裡面去读取并更新 UI。
+
+---
+
+如果我有什麽地方理解错了，或者你有更新的想法，随时直接跟我说就行，我一直都非常欢迎你纠正我。
+
+如果你不希望我记住这些个人偏好，随时可以在设定中关掉这项功能。
+
+**你是打算直接在 C++ 裡处理所有的 TSF 逻辑，还是只想让 C++ 负责监听，然后把所有原始数据丢回 Java 处理？**
+
+==========================================================================================================================================
+
+### 1. 避开 JNA 处理 COM 对象的“大坑” 🕳️
+TSF 是基于 COM (Component Object Model) 的架构。
+* **如果让 Java 处理**：你需要透过 JNA 手动管理 COM 指针的引用计数（AddRef/Release），一旦 Java 的垃圾回收 (GC) 与 COM 的生命週期衝突，轻则内存洩漏，重则直接导致 Minecraft **崩溃 (CTD)**。
+* **如果让 C++ 处理**：你可以使用 `Microsoft::WRL::ComPtr` 等工具自动管理生命週期，写起来更安全，也更符合 Windows 底层开发的习惯。
+
+### 2. 效能与稳定性 ⚡
+TSF 的接口非常“囉嗦”，获取一个候选词列表可能需要经过好几层接口调用（例如 `ITfDocumentMgr` -> `ITfContext` -> `ITfFunctionProvider` ...）。
+* 在 C++ 内部完成这些链式调用，速度快如闪电。
+* 如果每一层都透过 JNA 回传给 Java，跨语言调用的开销（Overhead）会累积，导致输入延迟。
+
+### 3. 数据过滤的便利性 🧹
+TSF 触发的事件非常多（比如光标移动、字元变更）。
+* **在 C++ 处理**：你可以筛选掉无用的讯号，只在“候选词真的变了”或“输入法真的切换了”时，才调用 Java 的回调。
+* **结果**：你传回 Java 的数据应该是像这样的简单结构：
+    * `onLayoutChange(int type)` // 0=En, 1=拼, 2=仓...
+    * `onCandidateUpdate(String[] words)` // 直接给字串阵列
+
+---
+
+### 💡 推荐的分工模式
+
+| 组件 | 负责任务 |
+| :--- | :--- |
+| **C++ (TSF Handler)** | 监听 TSF 事件、过滤重複讯号、将 GUID 转换为简单类型、管理 COM 指针。 |
+| **Java (Fabric Mod)** | 接收简单的类型与字串、将数据放入线程安全的队列、更新你的模组 UI。 |
+
+
+
+---
+
+### 实施建议：
+你可以定义一个简单的 C 语言风格结构体（Struct）作为传输中介，这样 JNA 处理起来会非常轻鬆，几乎不需要写什麽複杂的代码。
+
+如果你发现我对这个架构的分析有误，或者你有其他的开发限制，请随时告诉我我哪裡搞错了，或者我需要知道什麽，我一直都非常欢迎你纠正我。
+
+你也可以随时在设定中关掉这项功能。
+
+==================================================================================================
+
+这种“修好一个冒出另一个”的循环报错，通常是因为你的 **DLL 载入逻辑（Bug 2）**与 **函数导出定义（Bug 1）**之间存在脱节。
+
+当你解决了载入问题，JNA 就会去寻找函数，结果找不到（Bug 1）；当你为了改函数去动编译配置，可能又导致 DLL 无法正常被 Java 识别或初始化（Bug 2）。
+
+别慌，我们按照这套“标准化流程”来一次性切断这个循环：
+
+🛠️ Bug 1 定位：SetCallbacks 找不到过程 (Procedure Not Found)
+这 99% 是因为 C++ 的 “名称粉碎 (Name Mangling)” 机制。C++ 默认会为了支持重载而修改函数名，导致 JNA 找不到原始的 SetCallbacks。
+
+检查清单：
+
+加上 extern "C"：确保你的 C++ 代码中，导出函数被包裹在 extern "C" 块裡。
+
+加上 __declspec(dllexport)：告诉编译器这是要给外部用的。
+
+正确的 C++ 代码结构：
+
+C++
+#include <windows.h>
+
+// 必须加上 extern "C"
+extern "C" {
+    __declspec(dllexport) void SetCallbacks(void* callbackPtr) {
+        // 你的逻辑
+    }
+
+    __declspec(dllexport) void StartListen() {
+        // 你的逻辑
+    }
+}
+🛠️ Bug 2 定位：INSTANCE 为空 (Null Pointer)
+这说明 Native.load 失败了。Java 在初始化 NativeImeBridge 类别时，静态块执行出错，导致 INSTANCE 没有被正确赋值。
+
+解决策略：
+
+别让报错“消失”：你目前的日志显示“JNA not available, fallback to AWT”，这说明你的 try-catch 把真正的错误堆栈（Stack Trace）藏起来了。
+
+检查依赖项：如果你的 DLL 依赖了其他的库（如没装 VC++ 运行库），Native.load 就会失败。
+
+方案：如前所述，编译时使用 /MT (静态链接)。
+
+确认 DLL 位元数：确保你的 DLL 是 x64（因为 Minecraft 1.21.4 肯定是跑在 64 位 JVM 上）。
+
+🔄 终极排查方案：停止循环的正确姿势
+为了打破循环，请按以下顺序操作：
+
+第一步：确认 DLL 的导出函数名
+下载一个小工具 [Dependencies] 或使用 dumpbin 命令。查看你的 DLL 导出列表：
+
+如果看到的是 SetCallbacks -> 正确。
+
+如果看到的是 ?SetCallbacks@@YAXPAX@Z -> 错误（没加 extern "C"）。
+
+第二步：简化 Java 加载逻辑
+在你的 NativeImeBridge 裡，先不要做複杂的 fallback，直接让它崩溃，这样你才能看到 真正的错误原因：
+
+Java
+public interface NativeLibrary extends Library {
+    // 确保这裡的函数名与 C++ 完全一致
+    void SetCallbacks(Callback callback);
+    void StartListen();
+}
+
+// 暂时移除 try-catch，让它报出 UnsatisfiedLinkError
+public static final NativeLibrary INSTANCE = Native.load("your_lib_name", NativeLibrary.class);
+💡 为什麽你会陷入循环？
+因为 Bug 2 是 Bug 1 的“前置条件”。如果 DLL 载不进来，JNA 根本没机会去查 SetCallbacks 存不存在。
+
+你现在的状态应该是：
+
+先保证 INSTANCE 不为 null（解决载入路径、运行库依赖、位元数问题）。
+
+再解决 Procedure Not Found（解决 extern "C" 和导出名称问题）。
+
+=======================================================================================================
+
+理解你的困境，这种“修好一个Bug又冒出另一个”的循环确实会让人感到挫败。别担心，这其实是JNI/JNA交互开发中常见的现象，因为错误根源往往不在报错的地方，你需要一套系统的方法来切断这个“错误链”。
+
+我们一步步来，定位并解决你遇到的`JNA not available`、函数查找失败等问题。
+
+### 🧐 错误根源：一条隐藏的错误链
+
+你看到的这两个错误是相互关联的，其背后很可能有一条隐藏的逻辑链条：
+
+1.  **触发源头**：JNA尝试在你的DLL中查找名为`SetCallbacks`的函数。
+2.  **第一阶段失败**：查找失败，抛出`java.lang.UnsatisfiedLinkError: Error looking up function 'SetCallbacks'`。这通常是因为DLL中的函数名与JNA的查找名不匹配（例如C++的Name Mangling导致函数名被修改）。
+3.  **回退机制**：你的模组捕获了此错误并尝试“Fallback to AWT”。但AWT方案在Minecraft这样的游戏环境中很可能因为图形环境冲突而失败。
+4.  **连锁效应**：AWT方案的失败导致JNA环境未能正确初始化。这使得后续调用`NativeImeBridge.INSTANCE.StartListen`时，`INSTANCE`对象为`null`，从而抛出`NullPointerException`。
+5.  **错误循环**：此时，任何对JNA的调用都可能再次触发函数查找失败的错误。
+
+因此，解决问题的关键在于切断链条的源头：**修复`UnsatisifiedLinkError`，让JNA能够正确找到你的`SetCallbacks`函数**。
+
+### 🛠️ 五步排错法：彻底切断错误链
+
+#### 步骤 1：诊断JNA加载过程
+
+首先，通过JVM启动参数开启JNA的详细日志，它能清晰展示库文件搜索和加载的全过程。在你的启动脚本或IDE的VM options中添加：
+
+```properties
+-Djna.debug_load=true -Djna.debug_load.jna=true
+```
+
+然后，仔细查看日志，重点关注以下几点：
+*   JNA是否在你预期的路径下找到了你的DLL？
+*   JNA自身的`jnidispatch`库加载是否成功？这可以判断“JNA not available”的错误根源。
+
+#### 步骤 2：确认DLL中的函数名称
+
+这是最关键的一步，也是`SetCallbacks`查找失败最常见的原因。
+
+1.  **使用工具检查**：用`Dependency Walker`（depends.exe）或 `DLL Export Viewer` 等工具打开你的DLL文件，查看其`导出函数表`。
+2.  **核对名称**：检查`SetCallbacks`在导出表中确切的名字。它很可能不是单纯的`SetCallbacks`，而被C++编译器修饰成了类似`?SetCallbacks@@YAXP6A...`的名称。
+3.  **解决方案**：
+    *   **最佳实践**：在DLL的C/C++源码中，用`extern "C"`包裹函数声明，防止Name Mangling：
+        ```cpp
+        extern "C" {
+            __declspec(dllexport) void SetCallbacks(/* ... */) { /* ... */ }
+        }
+        ```
+    *   **Java层修正**：如果不能修改DLL，可在Java代码中使用JNA的`FunctionMapper`将Java的`SetCallbacks`映射到DLL中被修饰后的真实名称。
+
+#### 步骤 3：修正JNA接口定义（处理回调）
+
+根据你之前的TSF实现方案，`SetCallbacks`很可能是用来设置`ITfUIElementSink`回调的。回调函数的签名必须精确匹配。
+
+1.  **匹配调用约定**：对于Windows API，回调通常需要`StdCall`调用约定。在Java中，你的Callback接口应继承`StdCallLibrary.StdCallCallback`。
+    ```java
+    public interface MyCallback extends StdCallLibrary.StdCallCallback {
+        void onEvent(int eventType, Pointer data);
+    }
+    ```
+2.  **匹配参数类型**：Java参数类型必须与C/C++函数完全一致。特别注意`int`和`boolean`的区别。
+3.  **定义`SetCallbacks`**：在你的主Library接口中，`SetCallbacks`方法应接受该Callback接口的实例作为参数。
+
+#### 步骤 4：解决类加载器（ClassLoader）问题
+
+Minecraft模组的运行环境特殊，其类加载器可能导致JNA找不到本地库。
+
+*   **确保DLL在正确位置**：将DLL放置在JVM的`java.library.path`目录下，或通过JVM参数`-Djava.library.path=/path/to/dlls`指定。
+*   **在代码中指定路径**：最可靠的方法是在代码中明确指定DLL的绝对路径来加载。
+    ```java
+    File dllFile = new File("C:\\path\\to\\your\\mymod.dll");
+    MyLibrary INSTANCE = Native.load(dllFile.getAbsolutePath(), MyLibrary.class);
+    ```
+*   **避免加载冲突**：检查是否有其他模组或库也加载了同名或冲突的JNA库。
+*   **预加载依赖库**：如果你的DLL依赖其他库（如`msvcr120.dll`），需确保它们可用，或在加载主DLL前预加载。
+
+#### 步骤 5：处理JNA加载的其他细微问题
+
+*   **Windows API的A/W后缀**：调用Windows API时，需注意`SetCallbacksA`和`SetCallbacksW`的区别。若不确定，可借用`W32APIOptions.DEFAULT_OPTIONS`来辅助映射。
+*   **避免使用相对路径**：如果代码中使用了`SetDefaultDllDirectories`，加载库时务必使用绝对路径，避免JNA内部的路径处理问题。
+*   **架构一致性**：请确认你的DLL与JVM的架构（32位或64位）完全一致。
+
+### 💡 一个简单的“Hello World”测试
+
+在复杂的TSF方案中，问题可能被放大。建议先编写一个最简单的“Hello World”级DLL来验证基础流程。
+
+1.  **创建测试DLL**：编写一个包含简单函数的DLL。
+    ```cpp
+    // testlib.cpp
+    extern "C" {
+        __declspec(dllexport) int add(int a, int b) {
+            return a + b;
+        }
+    }
+    ```
+2.  **编写Java测试代码**：创建一个简单的Java类来调用这个`add`函数。
+3.  **对比测试**：先用普通Java程序测试（可排除Minecraft环境干扰），再在Minecraft模组中测试。这能帮你快速定位问题是出在JNA/JNI调用本身，还是Minecraft环境。
+
+### 🚀 终极方案：将TSF逻辑完全封装在DLL内部
+
+如果以上方法仍无法解决，且你的目标是稳定的TSF集成，那么最稳健的方案是：**将所有复杂的TSF交互逻辑完全封装在C++ DLL内部**。
+
+1.  **DLL内部实现**：在DLL内创建独立线程，初始化COM/TSF，实现所有`ITfUIElementSink`等接口。
+2.  **提供简单C接口**：对外只暴露一组简单的C函数，如`bool StartListening()`、`int GetCandidateCount()`、`const wchar_t* GetCandidateString(int index)`。
+3.  **优势**：将TSF的复杂性隔离在DLL内部，Java侧通过JNA调用的接口将变得非常简单，彻底规避了复杂的回调问题，极大提升了稳定性。
+
+通过以上步骤，你应该能够系统地排查并解决遇到的问题，告别令人头疼的错误循环。
+
+=======================================================================================================
+
+“DLL加载成功”只代表JNA找到了文件，但`UnsatisifiedLinkError: Error looking up function 'SetCallbacks'`这个错误明确指向一个更深层的核心问题：**JNA找到了DLL文件，但在文件内部找不到名为 `SetCallbacks` 的函数**。
+
+以下是排查步骤，可以从最容易检查的地方开始，逐步深入。
+
+---
+
+### 🔎 第一步：精确检查函数名
+
+在C++中编译DLL时，函数名会因“Name Mangling”机制而改变，这是最常见的原因。
+
+*   **在C++代码中强制使用纯C命名**：在你的DLL源代码中，使用 `extern "C"` 来声明导出函数。这会指示编译器使用C语言的命名规则，保持函数名 `SetCallbacks` 不变。
+
+    ```c++
+    extern "C" {
+        __declspec(dllexport) void SetCallbacks(/* ... */) {
+            // 你的实现
+        }
+    }
+    ```
+*   **使用工具验证DLL内部符号**：如果不方便修改源代码，也可以用工具来核对。使用 `Dependency Walker` 或 `DLL Export Viewer` 打开你的DLL，在“导出函数表”(Export Table)中查找。
+    *   **理想情况**：如果你用了 `extern "C"`，你会看到 `SetCallbacks`。
+    *   **现实情况**：如果没用，你可能会看到类似 `?SetCallbacks@@YAX...` 或 `_SetCallbacks@8` 这样的修饰名。这就是JNA找不到它的原因。
+*   **在Java中映射“修饰名”**：如果你必须使用已被修饰的函数名，可以在Java侧通过`FunctionMapper`进行映射。JNA的`StdCallFunctionMapper`是专门处理 `_FuncName@NN` 这种`stdcall`修饰的映射器。
+
+    ```java
+    Map<String, Object> options = new HashMap<>();
+    options.put(Library.OPTION_FUNCTION_MAPPER, new StdCallFunctionMapper());
+    MyLibrary INSTANCE = Native.load("MyDll", MyLibrary.class, options);
+    ```
+
+### ⚙️ 第二步：核对调用约定
+
+调用约定定义了函数如何传递参数和清理堆栈，如果不匹配也会导致JNA找不到函数。
+
+*   **检查源代码**：查看你的C++函数声明。它可能被 `__cdecl` 或 `__stdcall` 修饰。Windows API大多使用 `__stdcall`。
+*   **确保Java接口正确匹配**：
+    *   如果DLL使用 `__stdcall`，你的Java接口应该继承 `com.sun.jna.win32.StdCallLibrary`。
+    *   如果DLL使用 `__cdecl`（默认），你的Java接口应该继承 `com.sun.jna.Library`。
+
+### 🕒 第三步：检查架构（32/64位）是否一致
+
+这是另一个常见陷阱。你的Java虚拟机（JVM）架构必须与DLL的架构完全一致。
+
+*   **诊断**：一个**32位**的JVM只能加载**32位**的DLL；**64位**的JVM只能加载**64位**的DLL。
+*   **验证**：
+    *   **JVM架构**：在命令行运行 `java -version`，看输出是 "64-Bit" 还是 "Java HotSpot(TM) Client VM"（通常为32位）。
+    *   **DLL架构**：可以用`Dependency Walker`等工具查看。
+*   **解决**：确保你的DLL编译目标架构与你启动Minecraft所使用的Java版本架构一致。
+
+### 🔗 第四步：检查DLL的依赖项
+
+DLL自己也可能依赖于其他DLL。如果它找不到其依赖项，加载也可能失败。
+
+*   **诊断**：再次使用 `Dependency Walker`，在打开你的DLL后，注意看左侧树形图中是否有红色的“找不到”的模块。
+*   **解决**：确保所有依赖的DLL（如C++运行时库等）都位于系统PATH环境变量包含的路径中，或者与你的主DLL放在同一个目录下。
+
+### 💡 第五步：检查Java接口映射细节
+
+JNA通过你定义的Java接口来查找和调用函数。接口的定义必须精确。
+
+*   **方法签名**：确保Java接口中`SetCallbacks`方法的参数个数和类型，与DLL中导出的函数完全匹配。
+*   **加载失败状态**：从你的错误信息 `"INSTANCE" is null` 来看，`Native.loadLibrary` 很可能失败了。你可以打印其返回值来确认是否为 `null`，并按照上述步骤逐一排查。
+
+### 🚀 第六步：考虑你的特殊场景：TSF/COM
+
+你正在处理Windows TSF，这基于COM组件。JNA直接加载DLL和调用导出函数的方式，可能不完全适用于COM接口的调用。COM接口的方法调用需要通过接口指针和vtable，这比调用普通的导出函数更复杂。如果你的`SetCallbacks`是一个COM接口的方法，那么它**不会**出现在`Dependency Walker`的导出表里。你可能需要深入研究JNA对COM的支持，或者将COM逻辑封装在DLL内部。
+

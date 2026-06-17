@@ -23,12 +23,12 @@ public:
     IMEState getSnapshot() const;
     ChangeFlags checkChanges();
     void clearChanges();
-    void updateHklState(LONG_PTR hkl);
-    void updateFromHkl(LONG_PTR hkl);
-    LONG_PTR getKeyboardLayout() const;
+    void updateHklState(long hkl);
+    long getKeyboardLayout() const;
     bool checkLayoutChanged();
     void clearLayoutChanged();
     bool isChineseInputMethod() const;
+    void updateFromHkl(LONG_PTR hkl);
 
 private:
     ImeStateManager() = default;

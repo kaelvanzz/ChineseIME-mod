@@ -1,0 +1,273 @@
+你的模组目前遇到的核心问题，根源在于**架构设计缺乏清晰的边界与职责分离**。当前的实现混杂了多种检测方式、回调路径以及状态管理逻辑，导致各种Bug交织出现。下面我将提供一份可落地的重构指南，帮助你建立一个稳定、可维护的输入法监听系统。
+
+---
+
+## 一、当前问题诊断
+
+回顾你遇到的主要问题：
+
+- **JNA加载与函数查找失败**：DLL导出函数名与Java映射不匹配，调用约定混乱。
+- **无法监听候选词**：TSF事件未正确注册，或IMM32回退逻辑不生效。
+- **指示器状态抖动**：输入法类型与中/英文模式判断逻辑冲突，HKL/TSF GUID检测结果互相覆盖。
+- **仓颉、注音等输入法无法识别**：过度依赖HKL（现代输入法不改变HKL），TSF GUID检测逻辑被后续HKL判断覆盖。
+- **Shift英文模式检测失效**：没有正确监听`ITfCompartmentEventSink`或`ImmGetConversionStatus`。
+
+**根本原因**：系统内存在多套并行的检测/通知路径（WinEvent钩子、TSF Sink、IMM32轮询），它们各自维护状态并随意更新缓存，导致状态不一致。
+
+---
+
+## 二、重构目标
+
+1. **明确单一状态源**：所有输入法状态（类型、中英文、候选词）统一由一个`ImeStateManager`管理，外部只能读取或通过统一接口更新。
+2. **平台抽象分层**：定义抽象的`ImeMonitor`接口，Windows平台实现`TsfMonitor`（主）和`Imm32Monitor`（备用），Linux/macOS实现`RimeMonitor`。
+3. **可靠的类型识别**：Windows下以TSF `ITfInputProcessorProfileActivationSink`的GUID为主，HKL仅作为fallback。
+4. **稳定的候选词获取**：TSF中使用`ITfCandidateList`（优先）或文本编辑属性；IMM32使用`ImmGetCandidateList`。
+5. **线程安全回调**：C++通过单一JNI回调对象向Java推送事件，Java内部再分发到主线程更新UI。
+
+---
+
+## 三、新架构设计
+
+### 3.1 整体分层
+
+```
+┌─────────────────────────────────────────┐
+│            Java (Minecraft)              │
+│  ┌───────────────────────────────────┐  │
+│  │  ImeGuiRenderer (UI线程)          │  │
+│  │  - onCandidateUpdate              │  │
+│  │  - onImeStateChange               │  │
+│  └───────────────────────────────────┘  │
+│              ▲                            │
+│              │ (通过 ConcurrentLinkedQueue│
+│              │  或 MC.execute)            │
+│  ┌───────────┴───────────────────────┐  │
+│  │  NativeBridge (JNI管理)           │  │
+│  │  - nativeSetCallback              │  │
+│  │  - nativeStart/Stop               │  │
+│  └───────────────────────────────────┘  │
+└──────────────────┬──────────────────────┘
+                   │ JNI
+┌──────────────────┴──────────────────────┐
+│       C++ DLL (chineseime_native)        │
+│  ┌───────────────────────────────────┐  │
+│  │  ImeStateManager (单例)           │  │
+│  │  - 当前类型、中英文模式、候选词   │  │
+│  │  - 变更通知 (回调Java)            │  │
+│  └───────────────────────────────────┘  │
+│           ▲            ▲                 │
+│           │            │                 │
+│  ┌────────┴──┐  ┌─────┴───────┐         │
+│  │ TsfMonitor │  │ Imm32Monitor│         │
+│  │ (Windows)  │  │ (备用)      │         │
+│  └────────────┘  └─────────────┘         │
+└──────────────────────────────────────────┘
+```
+
+在Linux/macOS下，`TsfMonitor`/`Imm32Monitor`替换为`RimeMonitor`（嵌入librime）。
+
+### 3.2 状态管理设计
+
+统一的数据结构`ImeState`（已有基础），由`ImeStateManager`负责维护：
+
+```cpp
+struct ImeState {
+    std::wstring composition;
+    std::vector<std::wstring> candidates;
+    int selectedIndex = 0;
+    InputMethodType inputMethod = InputMethodType::UNKNOWN;
+    bool chineseMode = false;      // 当前是否为中文模式（中/英）
+    bool imeOpen = false;          // 输入法是否开启
+    bool capsLock = false;
+    bool shiftHeld = false;        // 仅用于显示，不参与逻辑
+};
+```
+
+`ImeStateManager`提供：
+- `updateFromTsf(const TSFState&)` / `updateFromIMM(const IMMState&)`：各Monitor调用，内部进行合并并检测变化。
+- 每次状态变化后，自动回调Java（通过`JniCallback`接口）。
+
+### 3.3 回调架构
+
+在C++中定义统一的回调接口，Java通过JNI注册一个回调对象。C++内部使用全局函数指针指向Java方法：
+
+```cpp
+// 全局回调
+static JavaVM* g_jvm = nullptr;
+static jobject g_callbackObj = nullptr;
+static jmethodID g_midOnCandidate = nullptr;
+static jmethodID g_midOnStateChange = nullptr;
+
+void JniCallback::onCandidateChanged(const ImeState& state) {
+    // 获取JNIEnv，转换为Java字符串数组并调用
+}
+void JniCallback::onImeStateChanged(InputMethodType type, bool chineseMode) {
+    // 调用Java方法
+}
+```
+
+**关键点**：所有对Java的回调必须在独立于TSF/IMM工作线程的线程上调用，或者通过`AttachCurrentThread`妥善处理。推荐在`ImeStateManager`的更新方法内直接调用，该方法可能被各种Monitor线程调用，需确保每次调用前附加JVM。
+
+---
+
+## 四、Windows平台Monitor重构
+
+### 4.1 TsfMonitor（主要监听器）
+
+**职责**：精确识别输入法类型、获取候选词、监听中英文切换。
+
+**实现要点**：
+
+1. **初始化**：在STA线程中激活`ITfThreadMgr`，并注册以下Sink：
+   - `ITfInputProcessorProfileActivationSink`：用于**精确识别输入法类型**。
+   - `ITfCompartmentEventSink`：监听`GUID_COMPARTMENT_KEYBOARD_OPENCLOSE`，获取**中英文切换**（Shift）。
+   - `ITfTextEditSink`：用于在文本变化时更新候选词（或结合`ITfCandidateList`）。
+   - `ITfUIElementSink`：如果需要直接获取UI候选窗数据（可选，但更可靠）。
+
+2. **类型识别**：在`OnActivated`中，使用`guidProfile`与已知GUID进行匹配（你已经在`tsf_sink.cpp`中定义了GUID）。更新`currentInputMethod_`，并立即通知`ImeStateManager`。
+   - **注意**：不再使用HKL作为主判断，HKL只作为`OnActivated`未触发或GUID未知时的兜底。
+
+3. **中英文模式检测**：
+   - 主方案：`GUID_COMPARTMENT_KEYBOARD_OPENCLOSE`的`ITfCompartmentEventSink::OnChange`。
+   - 备用方案：`ImmGetConversionStatus`的`IME_CMODE_NATIVE`标志。
+
+4. **候选词获取**：
+   - 优先尝试`ITfCandidateList`接口（通过`ITfUIElementMgr`或文本属性）。
+   - 若失败，回退到读取`GUID_PROP_COMPOSING`等属性。
+   - 完整实现示例可参考你现有的`getCandidateListFromProperty`，增加更多候选词来源。
+
+5. **HKL变化监听**（仅作辅助）：
+   - 仍然保留`WM_INPUTLANGCHANGE`监听，但只用于**检测输入法关闭/切换到纯英文**的事件，不用于类型识别。
+
+### 4.2 Imm32Monitor（备用监听器）
+
+**用途**：当TSF初始化失败，或检测到某些传统IMM32输入法（如老式仓颉、速成）时激活。
+
+**实现**：
+- 创建隐藏窗口，在窗口过程中处理`WM_IME_COMPOSITION`、`WM_IME_NOTIFY`等消息。
+- 使用`ImmGetCandidateList`获取候选词。
+- 类型识别仍然可以通过TSF的`OnActivated`获得（如果能初始化TSF），或依赖HKL的高字部分。
+- 该Monitor只会被`ImeStateManager`在需要时启动。
+
+### 4.3 状态去抖与仲裁
+
+`ImeStateManager`接收来自多个Monitor的更新，需要制定仲裁规则：
+- **类型变更**：以`TsfMonitor`的GUID识别为准，`Imm32Monitor`不更改类型。
+- **中英文模式**：以`TsfMonitor`的Compartment值为准，`Imm32Monitor`的`ImmGetConversionStatus`作为补充。
+- **候选词**：若`TsfMonitor`能提供候选词则使用，否则使用`Imm32Monitor`的候选词。
+
+每次更新时，比较新旧状态，仅在真正的变化时触发回调。
+
+---
+
+## 五、集成Rime引擎（未来扩展）
+
+重构时可预留`RimeMonitor`接口，它实现与`ImeMonitor`相同的抽象。核心任务：
+- 使用JNI加载`librime`。
+- 实现`RimeSession`管理、按键处理、候选词获取。
+- 完全绕过系统IME，因此Linux/macOS也能工作。
+
+这样做可让你在未来用同一套模组覆盖全平台。
+
+---
+
+## 六、Java层重构
+
+### 6.1 JNI桥接类
+
+```java
+public class NativeImeBridge {
+    public static native void nativeSetCallback(ImeCallback callback);
+    public static native boolean nativeStartListener(long hwnd);
+    public static native void nativeStopListener();
+    // ...
+}
+```
+
+### 6.2 回调接口
+
+```java
+public interface ImeCallback {
+    void onCandidateUpdate(String composition, String[] candidates, int selected);
+    void onImeStateChanged(int imeType, boolean chineseMode);
+}
+```
+
+### 6.3 UI线程集成
+
+使用`MinecraftClient.getInstance().execute(() -> { ... })`或`RenderTask`队列，将从Native回调中接收的数据同步到渲染线程。
+
+---
+
+## 七、迁移与测试步骤
+
+1. **备份现有代码**，创建新分支。
+2. **从零开始实现**`ImeStateManager`和`JniCallback`，不依赖旧代码。
+3. **移植并重构**`TsfSink`为`TsfMonitor`，移除所有直接操作`g_cache`和`g_callbacks`的代码，改为通过`ImeStateManager`统一更新。
+4. **独立实现**`Imm32Monitor`，仅使用标准IMM32消息，不混合其他逻辑。
+5. **编写测试**：使用简单的C++单元测试（或通过Java测试）验证状态变化是否按预期触发回调。
+6. **在游戏中验证**：分别测试拼音、注音、仓颉、五笔的切换、候选词显示、Shift中英文切换，以及中英文指示器的稳定性。
+
+---
+
+## 八、关键代码片段（新架构示例）
+
+**ImeStateManager核心逻辑**
+
+```cpp
+class ImeStateManager {
+public:
+    static ImeStateManager& get();
+    void updateInputMethod(InputMethodType type) {
+        std::lock_guard<std::mutex> lock(mutex_);
+        if (state_.inputMethod != type) {
+            state_.inputMethod = type;
+            notifyStateChange();  // 通知Java
+        }
+    }
+    void updateChineseMode(bool isChinese) {
+        std::lock_guard<std::mutex> lock(mutex_);
+        if (state_.chineseMode != isChinese) {
+            state_.chineseMode = isChinese;
+            notifyStateChange();
+        }
+    }
+    void updateCandidates(const std::wstring& comp, 
+                          const std::vector<std::wstring>& cands, int sel) {
+        std::lock_guard<std::mutex> lock(mutex_);
+        state_.composition = comp;
+        state_.candidates = cands;
+        state_.selectedIndex = sel;
+        notifyCandidateChange();
+    }
+    ImeState getSnapshot() const { /* 返回拷贝 */ }
+private:
+    void notifyCandidateChange() {
+        JniCallback::onCandidateChanged(state_);
+    }
+    void notifyStateChange() {
+        JniCallback::onImeStateChanged(state_.inputMethod, state_.chineseMode);
+    }
+    mutable std::mutex mutex_;
+    ImeState state_;
+};
+```
+
+**TsfMonitor中类型识别**
+
+```cpp
+void TsfMonitor::OnActivated(...) {
+    InputMethodType type = detectTypeByGuid(guidProfile);
+    if (type != UNKNOWN) {
+        ImeStateManager::get().updateInputMethod(type);
+    }
+}
+```
+
+---
+
+## 九、总结
+
+重构的核心是**状态统一管理**和**职责分离**。将TSF与IMM32的回调全部汇聚到`ImeStateManager`，由它决定最终状态并回调Java，彻底消除多路径竞争。同时，提升TSF GUID识别的优先级，让注音、仓颉等现代输入法能被准确识别。
+
+按照这个指南逐步重构，你的模组将获得稳定的输入法支持，并为后续移植到Linux/macOS（集成Rime）打下坚实基础。一旦核心状态管理完成，其他功能只需添加新的Monitor实现即可，无需再大规模改动。

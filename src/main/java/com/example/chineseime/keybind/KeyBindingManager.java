@@ -20,6 +20,7 @@ public class KeyBindingManager {
     private boolean ctrlShiftFPressed = false;
     private boolean prevToggleImePressed = false;
     private boolean prevToggleModePressed = false;
+    private boolean prevOpenConfigPressed = false;
 
     public KeyBindingManager(ModConfig config, PlatformIMEManager ime) {
         this.config = config;
@@ -52,7 +53,7 @@ public class KeyBindingManager {
         MinecraftClient mc = MinecraftClient.getInstance();
         long win = mc.getWindow().getHandle();
 
-        if (this.toggleChinese.wasPressed()) {
+        if (this.ime != null && this.toggleChinese.wasPressed()) {
             this.ime.toggleChineseMode();
         }
 
@@ -61,15 +62,25 @@ public class KeyBindingManager {
 
         if (ctrl && shift && GLFW.glfwGetKey(win, GLFW.GLFW_KEY_F) == GLFW.GLFW_PRESS) {
             if (!this.ctrlShiftFPressed) {
-                this.ime.toggleScriptType();
+                if (this.ime != null) this.ime.toggleScriptType();
                 this.ctrlShiftFPressed = true;
             }
         } else {
             this.ctrlShiftFPressed = false;
         }
 
-        // openConfig keybinding (Ctrl+G / comma) is handled by openConfig.wasPressed() below
-        // to avoid double-toggle when both the raw handler and keybinding fire together
+        if (ctrl && GLFW.glfwGetKey(win, GLFW.GLFW_KEY_G) == GLFW.GLFW_PRESS) {
+            if (!this.prevOpenConfigPressed) {
+                if (mc.currentScreen instanceof ConfigScreen) {
+                    mc.currentScreen.close();
+                } else {
+                    mc.setScreen(new ConfigScreen(mc.currentScreen, this.config));
+                }
+                this.prevOpenConfigPressed = true;
+            }
+        } else {
+            this.prevOpenConfigPressed = false;
+        }
 
         if (this.openConfig.wasPressed()) {
             if (mc.currentScreen instanceof ConfigScreen) {
@@ -79,35 +90,37 @@ public class KeyBindingManager {
             }
         }
 
-        List<Integer> toggleImeKeys = this.config.getToggleImeKeys();
-        if (!toggleImeKeys.isEmpty()) {
-            boolean allPressed = true;
-            for (int key : toggleImeKeys) {
-                if (GLFW.glfwGetKey(win, key) != GLFW.GLFW_PRESS) {
-                    allPressed = false;
-                    break;
-                }
-            }
-            if (allPressed && !this.prevToggleImePressed) {
-                this.ime.toggleInputMethod();
-            }
-            this.prevToggleImePressed = allPressed;
-        }
-
-        if (!PlatformIMEManager.getPlatform().equals(PlatformIMEManager.OS.WINDOWS)) {
-            List<Integer> toggleModeKeys = this.config.getToggleChineseModeKeys();
-            if (!toggleModeKeys.isEmpty()) {
+        if (this.ime != null) {
+            List<Integer> toggleImeKeys = this.config.getToggleImeKeys();
+            if (!toggleImeKeys.isEmpty()) {
                 boolean allPressed = true;
-                for (int key : toggleModeKeys) {
+                for (int key : toggleImeKeys) {
                     if (GLFW.glfwGetKey(win, key) != GLFW.GLFW_PRESS) {
                         allPressed = false;
                         break;
                     }
                 }
-                if (allPressed && !this.prevToggleModePressed) {
-                    this.ime.toggleChineseMode();
+                if (allPressed && !this.prevToggleImePressed) {
+                    this.ime.toggleInputMethod();
                 }
-                this.prevToggleModePressed = allPressed;
+                this.prevToggleImePressed = allPressed;
+            }
+
+            if (!PlatformIMEManager.getPlatform().equals(PlatformIMEManager.OS.WINDOWS)) {
+                List<Integer> toggleModeKeys = this.config.getToggleChineseModeKeys();
+                if (!toggleModeKeys.isEmpty()) {
+                    boolean allPressed = true;
+                    for (int key : toggleModeKeys) {
+                        if (GLFW.glfwGetKey(win, key) != GLFW.GLFW_PRESS) {
+                            allPressed = false;
+                            break;
+                        }
+                    }
+                    if (allPressed && !this.prevToggleModePressed) {
+                        this.ime.toggleChineseMode();
+                    }
+                    this.prevToggleModePressed = allPressed;
+                }
             }
         }
     }

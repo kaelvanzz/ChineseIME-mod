@@ -114,7 +114,7 @@ void Imm32Monitor::processComposition(HWND hwnd, HIMC himc) {
     if (compLen > 0) {
         int wcharLen = compLen / sizeof(wchar_t);
         std::vector<wchar_t> compBuf(wcharLen + 1);
-        ImmGetCompositionString(himc, GCS_COMPSTR, compBuf.data(), compLen);
+        ImmGetCompositionString(himc, GCS_COMPREADSTR, compBuf.data(), compLen);
         compBuf[wcharLen] = 0;
         composition.assign(compBuf.data(), wcharLen);
     }
@@ -130,11 +130,7 @@ void Imm32Monitor::processCandidate(HWND hwnd, HIMC himc) {
     if (bufSize > 0) {
         std::vector<char> candBuf(bufSize);
         CANDIDATELIST* candList = reinterpret_cast<CANDIDATELIST*>(candBuf.data());
-        // KEY FIX: Check the return value of ImmGetCandidateList. If it fails,
-        // candList->dwCount is garbage — do not use it.
-        if (ImmGetCandidateList(himc, 0, candList, bufSize) == 0) {
-            return;
-        }
+        ImmGetCandidateList(himc, 0, candList, bufSize);
         DWORD count = candList->dwCount;
         selectedIndex = candList->dwSelection;
         if (count > 10) count = 10;

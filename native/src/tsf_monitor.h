@@ -81,7 +81,6 @@ private:
     ITfContext* context_ = nullptr;
     ITfSource* contextSource_ = nullptr;
     ITfSource* threadMgrSource_ = nullptr;
-    ITfUIElementMgr* uiElementMgr_ = nullptr;
 
     DWORD editSinkCookie_ = TF_INVALID_COOKIE;
     DWORD keyEventSinkCookie_ = TF_INVALID_COOKIE;
@@ -89,6 +88,7 @@ private:
     DWORD compartmentSinkCookie_ = TF_INVALID_COOKIE;
     DWORD uiElementSinkCookie_ = TF_INVALID_COOKIE;
 
+    ITfUIElementMgr* uiElementMgr_ = nullptr;
     bool chineseMode_ = false;
     TfEditCookie ecReadOnly_ = 0;
 };

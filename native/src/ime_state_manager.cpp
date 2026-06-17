@@ -13,6 +13,10 @@ ImeStateManager& ImeStateManager::get() {
 void ImeStateManager::updateInputMethod(InputMethodType type) {
     std::lock_guard<std::mutex> lock(mutex_);
     if (state_.inputMethodType != type) {
+        char dbg[128];
+        sprintf_s(dbg, "[ChineseIME] updateInputMethod: %d -> %d\n",
+            (int)state_.inputMethodType, (int)type);
+        OutputDebugStringA(dbg);
         state_.inputMethodType = type;
         state_.layoutChangeCount++;
         changes_.inputMethodChanged = true;
@@ -62,19 +66,14 @@ void ImeStateManager::updateComposition(const std::wstring& comp) {
 
 void ImeStateManager::updateCandidates(const std::wstring& comp, const std::vector<std::wstring>& cands, int selectedIndex) {
     std::lock_guard<std::mutex> lock(mutex_);
-
-    if (!comp.empty() || cands.empty()) {
-        if (state_.composition != comp) {
-            state_.composition = comp;
-            changes_.compositionChanged = true;
-        }
+    if (state_.composition != comp) {
+        state_.composition = comp;
+        changes_.compositionChanged = true;
     }
-    if (!cands.empty() || comp.empty()) {
-        if (state_.candidates != cands || state_.selectedIndex != selectedIndex) {
-            state_.candidates = cands;
-            state_.selectedIndex = selectedIndex;
-            changes_.candidatesChanged = true;
-        }
+    if (state_.candidates != cands || state_.selectedIndex != selectedIndex) {
+        state_.candidates = cands;
+        state_.selectedIndex = selectedIndex;
+        changes_.candidatesChanged = true;
     }
 }
 
@@ -122,12 +121,12 @@ bool ImeStateManager::isChineseInputMethod() const {
     return type != InputMethodType::ENGLISH && type != InputMethodType::UNKNOWN;
 }
 
-LONG_PTR ImeStateManager::getKeyboardLayout() const {
+long ImeStateManager::getKeyboardLayout() const {
     std::lock_guard<std::mutex> lock(mutex_);
     return state_.hkl;
 }
 
-void ImeStateManager::updateHklState(LONG_PTR hkl) {
+void ImeStateManager::updateHklState(long hkl) {
     std::lock_guard<std::mutex> lock(mutex_);
     if (state_.hkl != hkl) {
         state_.hkl = hkl;

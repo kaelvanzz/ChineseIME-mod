@@ -23,8 +23,8 @@ CHINESEIME_API int IsListening(void);
 CHINESEIME_API int IsChineseMode(void);
 CHINESEIME_API int HasLayoutChanged(void);
 // CHINESEIME_API must not be used here because the function uses __declspec(dllexport) directly
-__declspec(dllexport) long GetKeyboardLayoutHKL(void);
-CHINESEIME_API const wchar_t* GetDllVersion(void);
+long GetKeyboardLayoutHKL(void);
+CHINESEIME_API const char* GetDllVersion(void);
 
 // TSF-based IME data (new API)
 CHINESEIME_API int StartTsfListen(void);

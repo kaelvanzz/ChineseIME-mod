@@ -3,6 +3,7 @@
 #include "ime_detector.h"
 #include "sta_thread.h"
 #include "win_event_bridge.h"
+#include "ime_callback.h"
 #include <comdef.h>
 #include <algorithm>
 #include <msctf.h>
@@ -29,74 +30,6 @@ const GUID GUID_MS_WUBI =
 const GUID GUID_MS_SUCHENG =
 { 0x6024b45f, 0x5c54, 0x11d4, { 0xb9, 0x21, 0x00, 0x80, 0xc8, 0x82, 0x68, 0x7e } };
 
-namespace {
-
-class TsfEditSession : public ITfEditSession {
-public:
-    TsfEditSession(ITfContext* pic, std::vector<std::wstring>* result, bool* success)
-        : pic_(pic), result_(result), success_(success), refCount_(1) {
-        *success_ = false;
-    }
-
-    STDMETHODIMP QueryInterface(REFIID riid, void** ppv) override {
-        if (riid == IID_IUnknown || riid == IID_ITfEditSession) {
-            *ppv = static_cast<ITfEditSession*>(this);
-            AddRef();
-            return S_OK;
-        }
-        *ppv = nullptr;
-        return E_NOINTERFACE;
-    }
-
-    STDMETHODIMP_(ULONG) AddRef() override { return InterlockedIncrement(&refCount_); }
-    STDMETHODIMP_(ULONG) Release() override {
-        LONG count = InterlockedDecrement(&refCount_);
-        if (count == 0) delete this;
-        return count;
-    }
-
-    STDMETHODIMP DoEditSession(TfEditCookie ec) override {
-        ITfProperty* prop = nullptr;
-        HRESULT hr = pic_->GetProperty(GUID_PROP_CANDIDATE, &prop);
-        if (FAILED(hr) || !prop) {
-            return S_OK;
-        }
-
-        IEnumTfRanges* enumRanges = nullptr;
-        hr = prop->EnumRanges(ec, &enumRanges, nullptr);
-        prop->Release();
-        if (FAILED(hr) || !enumRanges) {
-            return S_OK;
-        }
-
-        ITfRange* range = nullptr;
-        while (enumRanges->Next(1, &range, nullptr) == S_OK) {
-            if (range) {
-                wchar_t buffer[256];
-                ULONG fetched = 0;
-                hr = range->GetText(ec, 0, buffer, 255, &fetched);
-                if (SUCCEEDED(hr) && fetched > 0) {
-                    buffer[fetched] = 0;
-                    result_->push_back(buffer);
-                }
-                range->Release();
-            }
-        }
-        enumRanges->Release();
-
-        *success_ = !result_->empty();
-        return S_OK;
-    }
-
-private:
-    ITfContext* pic_;
-    std::vector<std::wstring>* result_;
-    bool* success_;
-    LONG refCount_;
-};
-
-} // anonymous namespace
-
 const GUID GUID_PROP_CANDIDATE =
 { 0xf3a465f7, 0x6be7, 0x4dfb, { 0x82, 0x3a, 0xcf, 0x59, 0x47, 0x16, 0x86, 0x1c } };
 
@@ -114,9 +47,107 @@ const GUID GUID_PROP_CANDIDATE =
 
 namespace chineseime {
 
-static InputMethodType detectInputMethodTypeFromHklSafe(HKL hkl) {
-    return detectInputMethodTypeFromHkl(hkl);
+static bool IsChineseLangId(LANGID langId) {
+    return langId == 0x0804 || langId == 0x0404 || langId == 0x0C04 || langId == 0x1404;
 }
+
+static InputMethodType detectInputMethodTypeFromHklSafe(HKL hkl) {
+    if (!hkl) return InputMethodType::UNKNOWN;
+    LANGID langId = LOWORD(reinterpret_cast<DWORD_PTR>(hkl));
+    if (!IsChineseLangId(langId)) return InputMethodType::ENGLISH;
+    DWORD_PTR hklValue = reinterpret_cast<DWORD_PTR>(hkl);
+    WORD imeId = HIWORD(hklValue);
+    InputMethodType type = detectInputMethodTypeFromImeId(imeId, langId);
+    if (type == InputMethodType::OTHER_CHINESE && IsChineseLangId(langId)) {
+        WCHAR klName[16] = {0};
+        if (GetKeyboardLayoutNameW(klName) && klName[0]) {
+            WCHAR layoutLow = klName[7];
+            WCHAR layoutHigh = klName[6];
+            if (layoutLow >= L'0' && layoutLow <= L'9') {
+                WORD extractedId = static_cast<WORD>((layoutHigh - L'0') * 16 + (layoutLow - L'0'));
+                type = detectInputMethodTypeFromImeId(extractedId, langId);
+            } else if (layoutLow >= L'A' && layoutLow <= L'F') {
+                WORD lowNibble = static_cast<WORD>(layoutLow - L'A' + 10);
+                WORD highNibble = static_cast<WORD>(layoutHigh - L'A' + 10);
+                WORD extractedId = static_cast<WORD>(lowNibble + (highNibble << 4));
+                type = detectInputMethodTypeFromImeId(extractedId, langId);
+            }
+        }
+    }
+    return type;
+}
+
+class TsfEditSession : public ITfEditSession {
+public:
+    TsfEditSession(ITfContext* pic, std::vector<std::wstring>* candidates, bool* success)
+        : pic_(pic), candidates_(candidates), success_(success), refCount_(1) {}
+
+    STDMETHODIMP QueryInterface(REFIID riid, void** ppv) override {
+        if (!ppv) return E_POINTER;
+        if (riid == IID_IUnknown || riid == IID_ITfEditSession) {
+            *ppv = static_cast<ITfEditSession*>(this);
+            AddRef();
+            return S_OK;
+        }
+        *ppv = nullptr;
+        return E_NOINTERFACE;
+    }
+
+    STDMETHODIMP_(ULONG) AddRef() override {
+        return InterlockedIncrement(&refCount_);
+    }
+
+    STDMETHODIMP_(ULONG) Release() override {
+        LONG count = InterlockedDecrement(&refCount_);
+        if (count == 0) {
+            delete this;
+        }
+        return count;
+    }
+
+    STDMETHODIMP DoEditSession(TfEditCookie ecReadOnly) override {
+        if (!pic_ || !candidates_) return E_FAIL;
+
+        ITfProperty* prop = nullptr;
+        HRESULT hr = pic_->GetProperty(GUID_PROP_CANDIDATE, &prop);
+        if (FAILED(hr) || !prop) {
+            if (success_) *success_ = false;
+            return S_OK;
+        }
+
+        IEnumTfRanges* enumRanges = nullptr;
+        hr = prop->EnumRanges(ecReadOnly, &enumRanges, nullptr);
+        prop->Release();
+        if (FAILED(hr) || !enumRanges) {
+            if (success_) *success_ = false;
+            return S_OK;
+        }
+
+        ITfRange* range = nullptr;
+        while (enumRanges->Next(1, &range, nullptr) == S_OK) {
+            if (range) {
+                wchar_t buffer[64];
+                ULONG fetched = 0;
+                hr = range->GetText(ecReadOnly, 0, buffer, 63, &fetched);
+                if (SUCCEEDED(hr) && fetched > 0) {
+                    buffer[fetched] = 0;
+                    candidates_->push_back(buffer);
+                }
+                range->Release();
+            }
+        }
+        enumRanges->Release();
+
+        if (success_) *success_ = !candidates_->empty();
+        return S_OK;
+    }
+
+private:
+    ITfContext* pic_;
+    std::vector<std::wstring>* candidates_;
+    bool* success_;
+    LONG refCount_;
+};
 
 TsfMonitor::TsfMonitor() {
     DEBUG_LOG_SIMPLE(L"[ChineseIME] TsfMonitor created\n");
@@ -392,95 +423,17 @@ STDMETHODIMP TsfMonitor::OnSetFocus(BOOL fForeground) {
 
 STDMETHODIMP TsfMonitor::BeginUIElement(DWORD dwUIElementId, BOOL* pbShow) {
     if (pbShow) *pbShow = TRUE;
-    char buf[256];
-    sprintf_s(buf, "[ChineseIME] BeginUIElement CALLED: id=%d (threadId=%u)\n", dwUIElementId, GetCurrentThreadId());
+    char buf[128];
+    sprintf_s(buf, "[ChineseIME] BeginUIElement: id=%d\n", dwUIElementId);
     OutputDebugStringA(buf);
-
-    // Try to get candidates from the UI element when it appears
-    if (uiElementMgr_) {
-        ITfUIElement* element = nullptr;
-        HRESULT hr = uiElementMgr_->GetUIElement(dwUIElementId, &element);
-        if (SUCCEEDED(hr) && element) {
-            ITfCandidateListUIElement* candUI = nullptr;
-            hr = element->QueryInterface(IID_ITfCandidateListUIElement, (void**)&candUI);
-            if (SUCCEEDED(hr) && candUI) {
-                UINT count = 0;
-                candUI->GetCount(&count);
-                if (count > 0) {
-                    std::vector<std::wstring> candidates;
-                    UINT selIndex = 0;
-                    candUI->GetSelection(&selIndex);
-                    for (UINT i = 0; i < count && i < 10; i++) {
-                        BSTR bstr = nullptr;
-                        if (candUI->GetString(i, &bstr) == S_OK && bstr) {
-                            candidates.push_back(bstr);
-                            SysFreeString(bstr);
-                        }
-                    }
-                    if (!candidates.empty()) {
-                        ImeStateManager::get().updateCandidates(L"", candidates, (int)selIndex);
-                    }
-                }
-                candUI->Release();
-            }
-            element->Release();
-        }
-    }
-
-    // Refresh state to get candidates when UI element appears
-    updateCache();
     return S_OK;
 }
 
 STDMETHODIMP TsfMonitor::UpdateUIElement(DWORD dwUIElementId) {
-    char buf[256];
-    sprintf_s(buf, "[ChineseIME] UpdateUIElement CALLED: id=%d (threadId=%u)\n", dwUIElementId, GetCurrentThreadId());
-    OutputDebugStringA(buf);
-
-    // Try to get candidates from the UI element
-    if (uiElementMgr_) {
-        ITfUIElement* element = nullptr;
-        HRESULT hr = uiElementMgr_->GetUIElement(dwUIElementId, &element);
-        if (SUCCEEDED(hr) && element) {
-            ITfCandidateListUIElement* candUI = nullptr;
-            hr = element->QueryInterface(IID_ITfCandidateListUIElement, (void**)&candUI);
-            if (SUCCEEDED(hr) && candUI) {
-                UINT count = 0;
-                candUI->GetCount(&count);
-                if (count > 0) {
-                    std::vector<std::wstring> candidates;
-                    UINT selIndex = 0;
-                    candUI->GetSelection(&selIndex);
-                    for (UINT i = 0; i < count && i < 10; i++) {
-                        BSTR bstr = nullptr;
-                        if (candUI->GetString(i, &bstr) == S_OK && bstr) {
-                            candidates.push_back(bstr);
-                            SysFreeString(bstr);
-                        }
-                    }
-                    if (!candidates.empty()) {
-                        ImeStateManager::get().updateCandidates(L"", candidates, (int)selIndex);
-                    }
-                }
-                candUI->Release();
-            }
-            element->Release();
-        }
-    }
-
-    // Also refresh state to get updated candidates from cache
-    updateCache();
     return S_OK;
 }
 
 STDMETHODIMP TsfMonitor::EndUIElement(DWORD dwUIElementId) {
-    char buf[128];
-    sprintf_s(buf, "[ChineseIME] EndUIElement: id=%d\n", dwUIElementId);
-    OutputDebugStringA(buf);
-
-    // Clear candidates when UI element closes
-    auto state = ImeStateManager::get().getSnapshot();
-    ImeStateManager::get().updateCandidates(L"", {}, 0);
     return S_OK;
 }
 
@@ -513,6 +466,16 @@ STDMETHODIMP TsfMonitor::OnActivated(DWORD dwProfileType, LANGID langid, REFCLSI
     OutputDebugStringA(dbg);
 
     if (dwFlags & TF_IPSINK_FLAG_ACTIVE) {
+        if (currentInputMethod_ != InputMethodType::UNKNOWN) {
+            ImeStateManager::get().updateInputMethod(currentInputMethod_);
+        } else {
+            InputMethodType hklType = detectInputMethodTypeFromHklSafe(hkl);
+            if (hklType != InputMethodType::UNKNOWN && hklType != InputMethodType::ENGLISH) {
+                currentInputMethod_ = hklType;
+                ImeStateManager::get().updateInputMethod(hklType);
+            }
+        }
+
         HWND fgWnd = GetForegroundWindow();
         bool imeOpen = false;
         bool isChineseLang = (langid == 0x0804 || langid == 0x0404 ||
@@ -528,9 +491,7 @@ STDMETHODIMP TsfMonitor::OnActivated(DWORD dwProfileType, LANGID langid, REFCLSI
         ImeStateManager::get().updateChineseMode(chineseMode_);
         ImeStateManager::get().updateImeOpen(imeOpen);
 
-        // Notify Java via WinEventBridge (TSF-initiated state change)
-        WinEventBridge::get().fireImeModeChangeCallback(
-            static_cast<int>(currentInputMethod_), chineseMode_);
+        onImeStateChanged(static_cast<int>(currentInputMethod_), chineseMode_);
     }
 
     return S_OK;
@@ -547,25 +508,19 @@ STDMETHODIMP TsfMonitor::OnChange(REFGUID rguid) {
                 updateCache();
             }
 
-            // Notify Java via WinEventBridge (mode toggled by user via TSF)
-            WinEventBridge::get().fireImeModeChangeCallback(
-                static_cast<int>(currentInputMethod_), newChineseMode);
+            onImeStateChanged(static_cast<int>(currentInputMethod_), newChineseMode);
         }
     }
     return S_OK;
 }
 
 bool TsfMonitor::detectChineseMode() {
-    // Use hooked window from WinEventBridge if available
-    HWND targetWnd = WinEventBridge::GetWinEventTargetWindow();
-    if (!targetWnd) {
-        targetWnd = GetForegroundWindow();
-    }
-    if (targetWnd) {
-        HIMC himc = ImmGetContext(targetWnd);
+    HWND fgWnd = GetForegroundWindow();
+    if (fgWnd) {
+        HIMC himc = ImmGetContext(fgWnd);
         if (himc) {
             bool imeOpen = ImmGetOpenStatus(himc) != 0;
-            ImmReleaseContext(targetWnd, himc);
+            ImmReleaseContext(fgWnd, himc);
             chineseMode_ = imeOpen;
             return chineseMode_;
         }
@@ -609,17 +564,8 @@ bool TsfMonitor::detectChineseMode() {
 void TsfMonitor::updateCache() {
     ImeStateManager& mgr = ImeStateManager::get();
 
-    char dbg[256];
-    sprintf_s(dbg, "[ChineseIME] updateCache: start, currentInputMethod_=%d, chineseMode_=%d\n", 
-        (int)currentInputMethod_, chineseMode_ ? 1 : 0);
-    OutputDebugStringA(dbg);
-
     if (currentInputMethod_ == InputMethodType::UNKNOWN) {
         queryCurrentInputMethod();
-    }
-
-    if (currentInputMethod_ != InputMethodType::UNKNOWN && currentInputMethod_ != InputMethodType::ENGLISH) {
-        mgr.updateInputMethod(currentInputMethod_);
     }
 
     mgr.updateChineseMode(chineseMode_);
@@ -630,13 +576,12 @@ void TsfMonitor::updateCache() {
     bool candidatesFound = false;
 
     ITfContext* ctx = getCurrentContext();
-    sprintf_s(dbg, "[ChineseIME] updateCache: TSF ctx=%p (STA tid=%u)\n", ctx, GetCurrentThreadId());
-    OutputDebugStringA(dbg);
     if (ctx) {
         getCompositionString(ctx, composition);
         if (getCandidateList(ctx, candidates, selectedIndex)) {
             candidatesFound = true;
         }
+        char dbg[256];
         sprintf_s(dbg, "[ChineseIME] updateCache: TSF candidatesFound=%d, candCnt=%d\n", 
             candidatesFound ? 1 : 0, (int)candidates.size());
         OutputDebugStringA(dbg);
@@ -646,37 +591,21 @@ void TsfMonitor::updateCache() {
     }
 
     if (!candidatesFound) {
-        // Use the hooked window from WinEventBridge instead of GetForegroundWindow()
-        // This is more reliable as it tracks the actual game window
-        HWND targetWnd = WinEventBridge::GetWinEventTargetWindow();
-        if (!targetWnd) {
-            targetWnd = GetForegroundWindow();
-        }
-        sprintf_s(dbg, "[ChineseIME] updateCache: IMM fallback, targetWnd=0x%p\n", targetWnd);
-        OutputDebugStringA(dbg);
-        if (targetWnd) {
-            // CRITICAL: Attach to the target window's thread BEFORE calling ImmGetContext!
-            DWORD targetThreadId = GetWindowThreadProcessId(targetWnd, nullptr);
-            DWORD staThreadId = GetCurrentThreadId();
-            bool attached = false;
-            if (targetThreadId != staThreadId) {
-                attached = AttachThreadInput(staThreadId, targetThreadId, TRUE) != 0;
-                sprintf_s(dbg, "[ChineseIME] updateCache: AttachThreadInput to targetThreadId=%u, result=%d\n", targetThreadId, attached ? 1 : 0);
-                OutputDebugStringA(dbg);
-            }
-            sprintf_s(dbg, "[ChineseIME] updateCache: calling ImmGetContext(0x%p)\n", targetWnd);
-            OutputDebugStringA(dbg);
-            HIMC himc = ImmGetContext(targetWnd);
-            sprintf_s(dbg, "[ChineseIME] updateCache: ImmGetContext returned himc=%p\n", himc);
-            OutputDebugStringA(dbg);
+        HWND fgWnd = GetForegroundWindow();
+        if (fgWnd) {
+            HIMC himc = ImmGetContext(fgWnd);
             if (himc) {
-                LONG compLen = ImmGetCompositionStringW(himc, GCS_COMPSTR, nullptr, 0);
-                // GCS_COMPREADSTR is raw pinyin — never use it as a fallback.
-                // If GCS_COMPSTR is empty, composition genuinely is empty right now.
+                LONG compLen = ImmGetCompositionString(himc, GCS_COMPSTR, nullptr, 0);
+                if (compLen <= 0) {
+                    compLen = ImmGetCompositionString(himc, GCS_COMPREADSTR, nullptr, 0);
+                }
                 if (compLen > 0) {
                     int wcharLen = compLen / sizeof(wchar_t);
                     std::vector<wchar_t> compBuf(wcharLen + 1);
-                    LONG actualLen = ImmGetCompositionStringW(himc, GCS_COMPSTR, compBuf.data(), compLen);
+                    LONG actualLen = ImmGetCompositionString(himc, GCS_COMPSTR, compBuf.data(), compLen);
+                    if (actualLen <= 0) {
+                        actualLen = ImmGetCompositionString(himc, GCS_COMPREADSTR, compBuf.data(), compLen);
+                    }
                     if (actualLen > 0) {
                         int actualWcharLen = actualLen / sizeof(wchar_t);
                         compBuf[actualWcharLen] = 0;
@@ -684,22 +613,19 @@ void TsfMonitor::updateCache() {
                     }
                 }
 
-                size_t bufSize = ImmGetCandidateListW(himc, 0, nullptr, 0);
+                size_t bufSize = ImmGetCandidateList(himc, 0, nullptr, 0);
                 if (bufSize > 0) {
                     std::vector<char> candBuf(bufSize);
                     CANDIDATELIST* candList = reinterpret_cast<CANDIDATELIST*>(candBuf.data());
-                    // FIX: Check return value before using candList
-                    DWORD result = ImmGetCandidateListW(himc, 0, candList, bufSize);
-                    if (result > 0) {
-                        DWORD count = candList->dwCount;
-                        selectedIndex = (int)candList->dwSelection;
-                        if (count > 10) count = 10;
-                        for (DWORD j = 0; j < count; j++) {
-                            wchar_t* pStr = (wchar_t*)(candBuf.data() + candList->dwOffset[j]);
-                            candidates.push_back(pStr);
-                        }
-                        candidatesFound = true;
+                    ImmGetCandidateList(himc, 0, candList, bufSize);
+                    DWORD count = candList->dwCount;
+                    selectedIndex = candList->dwSelection;
+                    if (count > 10) count = 10;
+                    for (DWORD j = 0; j < count; j++) {
+                        wchar_t* pStr = (wchar_t*)(candBuf.data() + candList->dwOffset[j]);
+                        candidates.push_back(pStr);
                     }
+                    candidatesFound = true;
                 }
 
                 char debugBuf[512];
@@ -707,38 +633,14 @@ void TsfMonitor::updateCache() {
                     composition.c_str(), (int)candidates.size(), candidatesFound ? 1 : 0);
                 OutputDebugStringA(debugBuf);
 
-                ImmReleaseContext(targetWnd, himc);
-            }
-            // Detach if we attached
-            if (attached && targetThreadId != staThreadId) {
-                AttachThreadInput(staThreadId, targetThreadId, FALSE);
+                ImmReleaseContext(fgWnd, himc);
             }
         }
     }
 
-    sprintf_s(dbg, "[ChineseIME] updateCache: final candidates cnt=%d, composition='%S'\n",
-        (int)candidates.size(), composition.c_str());
-    OutputDebugStringA(dbg);
+    mgr.updateCandidates(composition, candidates, selectedIndex);
 
-    // KEY FIX: Only call updateCandidates when at least one of comp/candidates
-    // is non-empty. Skip when both are empty to avoid wiping the cached state
-    // mid-session (IMM32 can return empty GCS_COMPSTR while candidates are still
-    // active, which would break IsComposing() and desync the Java-side HUD).
-    if (!composition.empty() || !candidates.empty()) {
-        mgr.updateCandidates(composition, candidates, selectedIndex);
-    }
-
-    // Use foreground window's thread to get keyboard layout
-    // Use the hooked window from WinEventBridge for keyboard layout check
-    HWND targetWnd = WinEventBridge::GetWinEventTargetWindow();
-    if (!targetWnd) {
-        targetWnd = GetForegroundWindow();
-    }
-    HKL hkl = nullptr;
-    if (targetWnd) {
-        DWORD threadId = GetWindowThreadProcessId(targetWnd, nullptr);
-        hkl = GetKeyboardLayout(threadId);
-    }
+    HKL hkl = GetKeyboardLayout(0);
     if (hkl) {
         LANGID langId = LOWORD(reinterpret_cast<DWORD_PTR>(hkl));
 
@@ -757,17 +659,13 @@ void TsfMonitor::updateCache() {
                 mgr.updateChineseMode(false);
             } else if (imType != InputMethodType::OTHER_CHINESE) {
                 mgr.updateInputMethod(imType);
-                // Use the hooked window for IME status check
-                HWND checkWnd = WinEventBridge::GetWinEventTargetWindow();
-                if (!checkWnd) {
-                    checkWnd = GetForegroundWindow();
-                }
+                HWND fgWnd = GetForegroundWindow();
                 bool imeOpen = true;
-                if (checkWnd) {
-                    HIMC himc = ImmGetContext(checkWnd);
+                if (fgWnd) {
+                    HIMC himc = ImmGetContext(fgWnd);
                     if (himc) {
                         imeOpen = ImmGetOpenStatus(himc) != 0;
-                        ImmReleaseContext(checkWnd, himc);
+                        ImmReleaseContext(fgWnd, himc);
                     }
                 }
                 mgr.updateImeOpen(imeOpen);
@@ -842,9 +740,8 @@ void TsfMonitor::notifyStateChanges(const IMEState& oldState, const IMEState& ne
         );
     }
 
-    if (oldState.inputMethodType != newState.inputMethodType || oldState.chineseMode != newState.chineseMode) {
-        WinEventBridge::get().fireImeModeChangeCallback(
-            static_cast<int>(newState.inputMethodType), newState.chineseMode);
+if (oldState.inputMethodType != newState.inputMethodType || oldState.chineseMode != newState.chineseMode) {
+        onImeStateChanged(static_cast<int>(newState.inputMethodType), newState.chineseMode);
     }
 }
 

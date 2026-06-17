@@ -1,377 +1,314 @@
-// Simplified IME Bridge — CocoaInput-style event-driven architecture
-// Based on libwincocoainput by Korea-Minecraft-Forum/CocoaInput-lib
-// v3.1 — Refactored: shared IME detection via ime_detector
-
+#include "ime_bridge.h"
+#include "ime_state_manager.h"
+#include "tsf_monitor.h"
+#include "imm32_monitor.h"
+#include "ime_callback.h"
+#include "sta_thread.h"
+#include "win_event_bridge.h"
 #include <windows.h>
 #include <imm.h>
 #include <string>
 #include <vector>
-#include <comdef.h>
-#include <msctf.h>
-#include "ime_state_manager.h"
-#include "ime_detector.h"
-#include "win_event_bridge.h"
+#include <thread>
+#include <atomic>
+#include <future>
+#include <algorithm>
+#include <debugapi.h>
+
+#pragma comment(lib, "imm32.lib")
 
 #ifdef min
 #undef min
 #endif
+#ifdef max
+#undef max
+#endif
 
-const char* VERSION = "3.1.0";
+#ifdef CHINESEIME_DEBUG
+#define DEBUG_LOG(format, ...) do { \
+    char buf[512]; \
+    sprintf_s(buf, format, __VA_ARGS__); \
+    OutputDebugStringA(buf); \
+} while(0)
+#define DEBUG_LOG_SIMPLE(msg) OutputDebugStringA(msg)
+#else
+#define DEBUG_LOG(format, ...)
+#define DEBUG_LOG_SIMPLE(msg)
+#endif
 
-static HWND g_hwnd = NULL;
-static HIMC g_himc = NULL;
-static WNDPROC g_originalWndProc = NULL;
-static bool g_compositionLocationNotified = false;
-static bool g_hookInstalled = false;
-static HHOOK g_messageHook = NULL;
-static HHOOK g_callWndProcHook = NULL;
+namespace {
 
-// Java callbacks
-static void (*g_javaPreedit)(const wchar_t* text, int cursor, int selLen) = NULL;
-static void (*g_javaCommit)(const wchar_t* text) = NULL;
-static void (*g_javaCandidates)(const wchar_t** cands, int count, int selIdx) = NULL;
-static void (*g_javaImeChange)(int imeType, int chineseMode) = NULL;
+PreeditCallback g_preeditCallback = nullptr;
+CommitCallback g_commitCallback = nullptr;
+CandidateCallback g_candidateCallback = nullptr;
+ImeChangeCallback g_imeChangeCallback = nullptr;
+KeyboardCallback g_keyboardCallback = nullptr;
 
-void setJavaCallbacks(
-    void (*preedit)(const wchar_t*, int, int),
-    void (*commit)(const wchar_t*),
-    void (*candidates)(const wchar_t**, int, int),
-    void (*imeChange)(int, int)) {
-    g_javaPreedit = preedit;
-    g_javaCommit = commit;
-    g_javaCandidates = candidates;
-    g_javaImeChange = imeChange;
-}
+std::unique_ptr<chineseime::StaThread> g_staThread;
+std::unique_ptr<chineseime::TsfMonitor> g_tsfMonitor;
+std::unique_ptr<chineseime::Imm32Monitor> g_imm32Monitor;
+std::atomic<bool> g_tsfInitialized{false};
+std::atomic<bool> g_imm32Initialized{false};
+static DWORD g_dwTfClientId = TF_CLIENTID_NULL;
+static HWND g_targetWindow = nullptr;
+static HWND g_hwnd = nullptr;
+static HIMC g_himc = nullptr;
+static HHOOK g_callWndProcHook = nullptr;
+static WNDPROC g_originalWndProc = nullptr;
+static std::atomic<bool> g_pollingRunning{false};
+static std::thread g_pollingThread;
+static void (*g_javaCandidates)(const wchar_t**, int, int) = nullptr;
 
 static inline bool isChinese(wchar_t c) {
     return (c >= 0x4E00 && c <= 0x9FFF) || (c >= 0x3400 && c <= 0x4DBF);
 }
 
-bool containsChinese(const wchar_t* str) {
-    if (!str) return false;
-    while (*str) {
-        if (isChinese(*str++)) return true;
-    }
-    return false;
+const char* VERSION = "2.2.0";
+
+bool IsChineseLangId(LANGID langId) {
+    return langId == 0x0804 || langId == 0x0404 || langId == 0x0C04 || langId == 0x1404;
 }
 
-bool compositionLocationNotify(HWND hWnd) {
-    HWND target = hWnd ? hWnd : g_hwnd;
-    if (!target) return false;
-
-    HIMC imc = ImmGetContext(target);
-    if (!imc) return false;
-
-    POINT pt = {0, 0};
-    CANDIDATEFORM candForm = {};
-    candForm.dwIndex = 0;
-    candForm.dwStyle = CFS_POINT;
-    candForm.ptCurrentPos = pt;
-    candForm.rcArea.left = 0;
-    candForm.rcArea.top = 0;
-    candForm.rcArea.right = 0;
-    candForm.rcArea.bottom = 0;
-
-    ImmSetCandidateWindow(imc, &candForm);
-    ImmReleaseContext(target, imc);
-    return true;
-}
-
-// ── IME type detection helper (shared logic) ──
-
-static int detectImeTypeFromHkl(HKL hkl, bool* outIsChinese) {
-    using namespace chineseime;
-
-    if (!hkl) {
-        if (outIsChinese) *outIsChinese = false;
-        return static_cast<int>(InputMethodType::ENGLISH);
-    }
-
-    DWORD_PTR hklVal = (DWORD_PTR)hkl;
-    LANGID langId = LOWORD(hklVal);
-
-    bool isChinese = IsChineseLangId(langId);
-    if (outIsChinese) *outIsChinese = isChinese;
-
-    if (!isChinese) {
-        return static_cast<int>(InputMethodType::ENGLISH);
-    }
-
-    InputMethodType type = detectInputMethodTypeFromHkl(hkl);
-    return static_cast<int>(type);
-}
-
-void readCandidates(HIMC himc) {
-    if (!himc || !g_hwnd) return;
-
-    DWORD candBufSize = ImmGetCandidateListW(himc, 0, NULL, 0);
-    if (candBufSize > 0) {
-        std::vector<char> candBuf(candBufSize);
-        CANDIDATELIST* candList = (CANDIDATELIST*)candBuf.data();
-        if (ImmGetCandidateListW(himc, 0, candList, candBufSize) > 0 && candList->dwCount > 0) {
-            std::vector<std::wstring> cands;
-            DWORD count = candList->dwCount > 9 ? 9 : candList->dwCount;
-            for (DWORD i = 0; i < count; i++) {
-                wchar_t* pStr = (wchar_t*)(candBuf.data() + candList->dwOffset[i]);
-                cands.push_back(pStr);
+chineseime::InputMethodType DetectInputMethodTypeFromHkl(HKL hkl) {
+    LANGID langId = LOWORD(reinterpret_cast<DWORD_PTR>(hkl));
+    DWORD_PTR hklValue = reinterpret_cast<DWORD_PTR>(hkl);
+    WORD imeId = HIWORD(hklValue);
+    chineseime::InputMethodType type = chineseime::detectInputMethodTypeFromImeId(imeId, langId);
+    if (type == chineseime::InputMethodType::OTHER_CHINESE && IsChineseLangId(langId)) {
+        WCHAR klName[16] = {0};
+        if (GetKeyboardLayoutNameW(klName)) {
+            WCHAR layoutLow = klName[0] ? klName[7] : 0;
+            WCHAR layoutHigh = klName[0] ? klName[6] : 0;
+            switch (layoutLow) {
+            case '0': case '1': case '2': case '3': case '4':
+            case '5': case '6': case '7': case '8': case '9':
+                type = chineseime::detectInputMethodTypeFromImeId(
+                    static_cast<WORD>(layoutLow - L'0' + ((layoutHigh - L'0') << 4)), langId);
+                break;
+            case 'A': case 'B': case 'C': case 'D': case 'E': case 'F':
+            case 'a': case 'b': case 'c': case 'd': case 'e': case 'f': {
+                WORD lowNibble = (layoutLow >= L'a') ? (WORD)(layoutLow - L'a' + 10) : (WORD)(layoutLow - L'A' + 10);
+                WORD highNibble = (layoutHigh >= L'a') ? (WORD)(layoutHigh - L'a' + 10) : (WORD)(layoutHigh - L'A' + 10);
+                type = chineseime::detectInputMethodTypeFromImeId(
+                    static_cast<WORD>(lowNibble + (highNibble << 4)), langId);
+                break;
             }
-            std::vector<const wchar_t*> ptrs;
-            for (auto& c : cands) ptrs.push_back(c.c_str());
-            int selIdx = (int)candList->dwSelection;
-            if (selIdx >= (int)count) selIdx = (int)count - 1;
-            if (g_javaCandidates) {
-                g_javaCandidates(ptrs.data(), (int)cands.size(), selIdx);
-            }
-            return;
-        }
-    }
-
-    // FALLBACK: window enumeration for third-party IMEs
-    std::vector<std::wstring> windowCandidates = chineseime::collectCandidatesFromWindowEnumeration();
-    if (!windowCandidates.empty()) {
-        std::vector<const wchar_t*> ptrs;
-        for (auto& c : windowCandidates) ptrs.push_back(c.c_str());
-        if (g_javaCandidates) {
-            g_javaCandidates(ptrs.data(), (int)ptrs.size(), 0);
-        }
-    }
-}
-
-// ── Message hook procedures ──
-
-static void processInputLangChange(HKL hkl) {
-    bool isChinese = false;
-    int imeType = detectImeTypeFromHkl(hkl, &isChinese);
-
-    chineseime::ImeStateManager::get().updateInputMethod(static_cast<chineseime::InputMethodType>(imeType));
-    chineseime::ImeStateManager::get().updateChineseMode(isChinese);
-    chineseime::ImeStateManager::get().updateImeOpen(isChinese);
-
-    char dbg[128];
-    sprintf_s(dbg, "[ChineseIME] IME type change via hook: type=%d (%S), chinese=%d\n",
-        imeType, chineseime::getInputMethodTypeName(static_cast<chineseime::InputMethodType>(imeType)), isChinese ? 1 : 0);
-    OutputDebugStringA(dbg);
-
-    if (g_javaImeChange) {
-        g_javaImeChange(imeType, isChinese ? 1 : 0);
-    }
-}
-
-static LRESULT CALLBACK MessageCallWndProc(int code, WPARAM wParam, LPARAM lParam) {
-    if (code >= 0) {
-        CWPSTRUCT* cwp = (CWPSTRUCT*)lParam;
-        if (cwp && cwp->message == WM_INPUTLANGCHANGE) {
-            processInputLangChange((HKL)cwp->lParam);
-        }
-    }
-    return CallNextHookEx(g_callWndProcHook, code, wParam, lParam);
-}
-
-static LRESULT CALLBACK MessageGetMsgProc(int code, WPARAM wParam, LPARAM lParam) {
-    if (code >= 0) {
-        MSG* msg = (MSG*)lParam;
-        if (msg && msg->hwnd) {
-            if (msg->message == WM_INPUTLANGCHANGE) {
-                processInputLangChange((HKL)msg->lParam);
-            }
-            else if (msg->hwnd == g_hwnd) {
-                if (msg->message == WM_IME_STARTCOMPOSITION) {
-                    g_compositionLocationNotified = false;
-                    compositionLocationNotify(msg->hwnd);
-                    if (g_javaPreedit) g_javaPreedit(L"", 0, 0);
-                }
-                else if (msg->message == WM_IME_COMPOSITION) {
-                    HIMC himc = ImmGetContext(msg->hwnd);
-                    if (himc) {
-                        if (msg->lParam & GCS_RESULTSTR) {
-                            LONG len = ImmGetCompositionStringW(himc, GCS_RESULTSTR, NULL, 0);
-                            if (len > 0) {
-                                std::vector<wchar_t> buf(len / sizeof(wchar_t) + 1);
-                                ImmGetCompositionStringW(himc, GCS_RESULTSTR, buf.data(), len);
-                                buf[len / sizeof(wchar_t)] = 0;
-                                if (g_javaCommit) g_javaCommit(buf.data());
-                            }
-                        }
-                        if (msg->lParam & GCS_COMPSTR) {
-                            LONG len = ImmGetCompositionStringW(himc, GCS_COMPSTR, NULL, 0);
-                            int cursor = 0;
-                            if (msg->lParam & GCS_CURSORPOS) {
-                                LONG cursorBytes = ImmGetCompositionStringW(himc, GCS_CURSORPOS, NULL, 0);
-                                cursor = (cursorBytes >= 0) ? cursorBytes / sizeof(wchar_t) : 0;
-                            }
-                            if (len > 0) {
-                                std::vector<wchar_t> buf(len / sizeof(wchar_t) + 1);
-                                ImmGetCompositionStringW(himc, GCS_COMPSTR, buf.data(), len);
-                                buf[len / sizeof(wchar_t)] = 0;
-                                int selLen = 0;
-                                LONG attrLen = ImmGetCompositionStringW(himc, GCS_COMPATTR, NULL, 0);
-                                if (attrLen > 0) {
-                                    std::vector<char> attrs(attrLen);
-                                    ImmGetCompositionStringW(himc, GCS_COMPATTR, attrs.data(), attrLen);
-                                    for (int i = 0; i < attrLen; i++) {
-                                        if (attrs[i] & ATTR_TARGET_CONVERTED) selLen++;
-                                    }
-                                }
-                                if (g_javaPreedit) g_javaPreedit(buf.data(), cursor, selLen);
-                                readCandidates(himc);
-                            } else {
-                                if (g_javaPreedit) g_javaPreedit(L"", 0, 0);
-                            }
-                        }
-                        ImmReleaseContext(msg->hwnd, himc);
-                    }
-                }
-                else if (msg->message == WM_IME_ENDCOMPOSITION) {
-                    g_compositionLocationNotified = false;
-                    if (g_javaPreedit) g_javaPreedit(L"", 0, 0);
-                }
-                else if (msg->message == WM_IME_NOTIFY) {
-                    if (msg->wParam == IMN_OPENCANDIDATE || msg->wParam == IMN_CHANGECANDIDATE || msg->wParam == IMN_PRIVATE) {
-                        compositionLocationNotify(msg->hwnd);
-                        g_compositionLocationNotified = true;
-                        HIMC himcTmp = ImmGetContext(msg->hwnd);
-                        if (himcTmp) {
-                            readCandidates(himcTmp);
-                            ImmReleaseContext(msg->hwnd, himcTmp);
-                        }
-                    } else if (msg->wParam == IMN_CLOSECANDIDATE) {
-                        // Sogou may close candidates without opening a new window
-                        // Clear candidates on close
-                        if (g_javaCandidates) {
-                            const wchar_t* empty = nullptr;
-                            g_javaCandidates(&empty, 0, 0);
-                        }
-                    }
-                }
             }
         }
     }
-    return CallNextHookEx(g_messageHook, code, wParam, lParam);
+    return type;
 }
 
-LRESULT CALLBACK ImeWndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam) {
-    switch (msg) {
-        case WM_IME_STARTCOMPOSITION: {
-            g_compositionLocationNotified = false;
-            compositionLocationNotify(hWnd);
-            if (g_javaPreedit) g_javaPreedit(L"", 0, 0);
-            return TRUE;
+void PollKeyboardState() {
+    bool capsLockOn = false;
+    bool shiftPressed = false;
+
+    HWND fgWnd = g_targetWindow;
+    if (!fgWnd) fgWnd = GetForegroundWindow();
+    if (!fgWnd) fgWnd = GetActiveWindow();
+
+    if (fgWnd) {
+        DWORD fgThreadId = GetWindowThreadProcessId(fgWnd, nullptr);
+        DWORD pollThreadId = GetCurrentThreadId();
+        if (fgThreadId != pollThreadId) {
+            AttachThreadInput(pollThreadId, fgThreadId, TRUE);
         }
 
-        case WM_IME_COMPOSITION: {
-            HIMC himc = ImmGetContext(hWnd);
-            if (!himc) break;
-
-            if (lParam & GCS_RESULTSTR) {
-                LONG len = ImmGetCompositionStringW(himc, GCS_RESULTSTR, NULL, 0);
-                if (len > 0) {
-                    std::vector<wchar_t> buf(len / sizeof(wchar_t) + 1);
-                    ImmGetCompositionStringW(himc, GCS_RESULTSTR, buf.data(), len);
-                    buf[len / sizeof(wchar_t)] = 0;
-                    if (g_javaCommit) g_javaCommit(buf.data());
-                }
-            }
-
-            if (lParam & GCS_COMPSTR) {
-                LONG len = ImmGetCompositionStringW(himc, GCS_COMPSTR, NULL, 0);
-                int cursor = 0;
-                if (lParam & GCS_CURSORPOS) {
-                    LONG cursorBytes = ImmGetCompositionStringW(himc, GCS_CURSORPOS, NULL, 0);
-                    cursor = (cursorBytes >= 0) ? cursorBytes / sizeof(wchar_t) : 0;
-                }
-
-                if (len > 0) {
-                    std::vector<wchar_t> buf(len / sizeof(wchar_t) + 1);
-                    ImmGetCompositionStringW(himc, GCS_COMPSTR, buf.data(), len);
-                    buf[len / sizeof(wchar_t)] = 0;
-
-                    int selLen = 0;
-                    LONG attrLen = ImmGetCompositionStringW(himc, GCS_COMPATTR, NULL, 0);
-                    if (attrLen > 0) {
-                        std::vector<char> attrs(attrLen);
-                        ImmGetCompositionStringW(himc, GCS_COMPATTR, attrs.data(), attrLen);
-                        for (int i = 0; i < attrLen; i++) {
-                            if (attrs[i] & ATTR_TARGET_CONVERTED) selLen++;
-                        }
-                    }
-
-                    if (g_javaPreedit) g_javaPreedit(buf.data(), cursor, selLen);
-
-                    if (!g_compositionLocationNotified) {
-                        compositionLocationNotify(hWnd);
-                        g_compositionLocationNotified = true;
-                    }
-
-                    readCandidates(himc);
-                } else {
-                    if (g_javaPreedit) g_javaPreedit(L"", 0, 0);
-                }
-            }
-
-            ImmReleaseContext(hWnd, himc);
-            return TRUE;
+        BYTE keyboardState[256];
+        if (GetKeyboardState(keyboardState)) {
+            capsLockOn = (keyboardState[VK_CAPITAL] & 0x01) != 0;
+            shiftPressed = (keyboardState[VK_SHIFT] & 0x80) != 0;
         }
 
-        case WM_IME_ENDCOMPOSITION: {
-            g_compositionLocationNotified = false;
-            if (g_javaPreedit) g_javaPreedit(L"", 0, 0);
-            return TRUE;
+        if (fgThreadId != pollThreadId) {
+            AttachThreadInput(pollThreadId, fgThreadId, FALSE);
         }
-
-        case WM_IME_NOTIFY: {
-            if (wParam == IMN_OPENCANDIDATE || wParam == IMN_CHANGECANDIDATE || wParam == IMN_PRIVATE) {
-                compositionLocationNotify(hWnd);
-                g_compositionLocationNotified = true;
-                HIMC himcTmp = ImmGetContext(hWnd);
-                if (himcTmp) {
-                    readCandidates(himcTmp);
-                    ImmReleaseContext(hWnd, himcTmp);
-                }
-                return TRUE;
-            } else if (wParam == IMN_CLOSECANDIDATE) {
-                return TRUE;
-            }
-            break;
-        }
-
-        case WM_INPUTLANGCHANGE: {
-            processInputLangChange((HKL)lParam);
-            break;
+    } else {
+        BYTE keyboardState[256];
+        if (GetKeyboardState(keyboardState)) {
+            capsLockOn = (keyboardState[VK_CAPITAL] & 0x01) != 0;
+            shiftPressed = (keyboardState[VK_SHIFT] & 0x80) != 0;
         }
     }
 
-    if (g_originalWndProc) {
-        return CallWindowProc(g_originalWndProc, hWnd, msg, wParam, lParam);
-    }
-    return DefWindowProc(hWnd, msg, wParam, lParam);
+    chineseime::ImeStateManager::get().updateKeyboardState(capsLockOn, shiftPressed);
 }
+
+void PollIMEState() {
+    auto& mgr = chineseime::ImeStateManager::get();
+
+    HWND fgWnd = g_targetWindow;
+    if (!fgWnd) fgWnd = GetForegroundWindow();
+    if (!fgWnd) fgWnd = GetActiveWindow();
+    if (!fgWnd) return;
+
+    HIMC himc = ImmGetContext(fgWnd);
+    if (!himc) {
+        HWND testWnd = GetForegroundWindow();
+        if (testWnd && testWnd != fgWnd) {
+            HIMC testHimc = ImmGetContext(testWnd);
+            if (testHimc) {
+                himc = testHimc;
+                fgWnd = testWnd;
+            }
+        }
+    }
+    if (!himc) return;
+
+    bool imeOpen = ImmGetOpenStatus(himc) != 0;
+    mgr.updateImeOpen(imeOpen);
+
+    bool chineseMode = false;
+    DWORD conversion = 0;
+    DWORD sentence = 0;
+    if (ImmGetConversionStatus(himc, &conversion, &sentence)) {
+        chineseMode = (conversion & IME_CMODE_NATIVE) != 0;
+    }
+    if (!imeOpen) {
+        chineseMode = false;
+    }
+    mgr.updateChineseMode(chineseMode);
+
+    DWORD fgThreadId = GetWindowThreadProcessId(fgWnd, nullptr);
+    DWORD pollThreadId = GetCurrentThreadId();
+    BOOL attached = FALSE;
+    if (fgThreadId != pollThreadId) {
+        attached = AttachThreadInput(pollThreadId, fgThreadId, TRUE);
+    }
+
+    HKL hkl = GetKeyboardLayout(0);
+    chineseime::InputMethodType detectedType = chineseime::InputMethodType::UNKNOWN;
+    if (hkl) {
+        detectedType = DetectInputMethodTypeFromHkl(hkl);
+    }
+
+    if (attached) {
+        AttachThreadInput(pollThreadId, fgThreadId, FALSE);
+    }
+
+    auto cachedType = mgr.getSnapshot().inputMethodType;
+    bool tsfHasSetType = (cachedType != chineseime::InputMethodType::UNKNOWN &&
+                          cachedType != chineseime::InputMethodType::ENGLISH);
+    if (!imeOpen) {
+        if (!tsfHasSetType) {
+            mgr.updateInputMethod(chineseime::InputMethodType::ENGLISH);
+        }
+    } else {
+        if (tsfHasSetType) {
+            if (detectedType != chineseime::InputMethodType::UNKNOWN &&
+                detectedType != chineseime::InputMethodType::ENGLISH &&
+                detectedType != cachedType) {
+                mgr.updateInputMethod(detectedType);
+            }
+        } else {
+            if (detectedType != chineseime::InputMethodType::UNKNOWN &&
+                detectedType != chineseime::InputMethodType::ENGLISH) {
+                mgr.updateInputMethod(detectedType);
+            } else {
+                mgr.updateInputMethod(chineseime::InputMethodType::PINYIN);
+            }
+        }
+    }
+
+    std::wstring composition;
+    LONG compLen = ImmGetCompositionString(himc, GCS_COMPSTR, nullptr, 0);
+    if (compLen <= 0) {
+        compLen = ImmGetCompositionString(himc, GCS_COMPREADSTR, nullptr, 0);
+    }
+    if (compLen > 0) {
+        int wcharLen = compLen / sizeof(wchar_t);
+        std::vector<wchar_t> compBuf(wcharLen + 1);
+        LONG actualLen = ImmGetCompositionString(himc, GCS_COMPSTR, compBuf.data(), compLen);
+        if (actualLen <= 0) {
+            actualLen = ImmGetCompositionString(himc, GCS_COMPREADSTR, compBuf.data(), compLen);
+        }
+        if (actualLen > 0) {
+            int actualWcharLen = actualLen / sizeof(wchar_t);
+            compBuf[actualWcharLen] = 0;
+            composition.assign(compBuf.data(), actualWcharLen);
+        }
+    }
+
+    std::vector<std::wstring> candidates;
+    int selectedIndex = 0;
+    size_t bufSize = ImmGetCandidateList(himc, 0, nullptr, 0);
+
+    char dbgBuf[256];
+    sprintf_s(dbgBuf, "[ChineseIME] PollIME: fgWnd=0x%X, himc=0x%X, bufSize=%zu, imeOpen=%d, compLen=%d\n",
+        (DWORD)(DWORD_PTR)fgWnd, (DWORD)(DWORD_PTR)himc, bufSize, imeOpen, (int)compLen);
+    OutputDebugStringA(dbgBuf);
+
+    if (bufSize > 0) {
+        std::vector<char> candBuf(bufSize);
+        CANDIDATELIST* candList = reinterpret_cast<CANDIDATELIST*>(candBuf.data());
+        ImmGetCandidateList(himc, 0, candList, bufSize);
+        DWORD count = candList->dwCount;
+        selectedIndex = candList->dwSelection;
+        if (count > 10) count = 10;
+        for (DWORD j = 0; j < count; j++) {
+            wchar_t* pStr = (wchar_t*)(candBuf.data() + candList->dwOffset[j]);
+            candidates.push_back(pStr);
+        }
+        sprintf_s(dbgBuf, "[ChineseIME] PollIME: got %d candidates, sel=%d\n", (int)count, selectedIndex);
+        OutputDebugStringA(dbgBuf);
+    }
+
+    mgr.updateCandidates(composition, candidates, selectedIndex);
+
+    ImmReleaseContext(fgWnd, himc);
+}
+
+} // anonymous namespace
+
+void setJavaCallbacks(
+    void(*preedit)(const wchar_t*, int, int),
+    void(*commit)(const wchar_t*),
+    void(*candidates)(const wchar_t**, int, int),
+    void(*imeChange)(int, int))
+{
+}
+
+namespace chineseime {
+
+void onImeStateChanged(int imeType, int chineseMode) {
+    WinEventBridge::get().fireImeStateCallback(imeType, chineseMode);
+}
+
+void onCandidateChanged(const wchar_t* composition, const wchar_t** candidates, int count, int selectedIndex) {
+    WinEventBridge::get().fireCandidateCallback(composition, candidates, count, selectedIndex);
+}
+
+void onKeyboardStateChanged(int capsLock, int shiftMode) {
+}
+
+} // namespace chineseime
 
 // ── Exported DLL functions ──
 
 extern "C" {
 
-__declspec(dllexport) const wchar_t* GetDllVersion() {
-    return L"3.1.0";
+__declspec(dllexport) void SetCallbacks(void* candidateUpdate, void* layoutChange, void* modeChange, void* keyboardState) {
 }
 
-__declspec(dllexport) int HookWindowProc(void* hwnd) {
-    if (!hwnd) return 0;
-    HWND h = (HWND)hwnd;
-    if (g_hwnd == h) return 1;
+__declspec(dllexport) int StartListen(void* hwnd) {
+    if (g_tsfInitialized.load() || g_imm32Initialized.load()) return 1;
 
-    g_originalWndProc = (WNDPROC)GetWindowLongPtr(h, GWLP_WNDPROC);
-    if (!g_originalWndProc) return 0;
+    g_targetWindow = hwnd ? reinterpret_cast<HWND>(hwnd) : nullptr;
 
-    LONG_PTR result = SetWindowLongPtr(h, GWLP_WNDPROC, (LONG_PTR)ImeWndProc);
-    if (result == 0) {
-        g_originalWndProc = NULL;
-        return 0;
+    HKL hkl = GetKeyboardLayout(0);
+    if (hkl) {
+        chineseime::InputMethodType type = DetectInputMethodTypeFromHkl(hkl);
+        chineseime::ImeStateManager::get().updateInputMethod(type);
+        LANGID langId = LOWORD(reinterpret_cast<DWORD_PTR>(hkl));
+        bool isChineseLang = IsChineseLangId(langId);
+        chineseime::ImeStateManager::get().updateChineseMode(isChineseLang);
+        chineseime::ImeStateManager::get().updateImeOpen(isChineseLang);
     }
 
-    g_hwnd = h;
-    g_himc = ImmGetContext(h);
+    g_hwnd = g_targetWindow;
+    g_himc = ImmGetContext(g_targetWindow);
     if (g_himc) {
-        ImmReleaseContext(h, g_himc);
+        ImmReleaseContext(g_targetWindow, g_himc);
     } else {
         g_himc = ImmCreateContext();
     }
@@ -430,154 +367,99 @@ __declspec(dllexport) int HookWindowProcRaw(ULONG_PTR hwnd) {
         OutputDebugStringA("[ChineseIME] GLFW window detected\n");
     }
 
-    SetLastError(0);
-    LONG_PTR result = SetWindowLongPtr(h, GWLP_WNDPROC, (LONG_PTR)ImeWndProc);
-    DWORD errAfterSet = GetLastError();
-    sprintf_s(dbg, "[ChineseIME] SetWindowLongPtr result: 0x%IX, oldProc: 0x%IX, error: %d\n",
-        (UINT64)result, (UINT64)oldProc, errAfterSet);
-    OutputDebugStringA(dbg);
+    g_tsfInitialized.store(true);
 
-    if (errAfterSet == 5) {
-        OutputDebugStringA("[ChineseIME] ERROR_ACCESS_DENIED (5)\n");
-    } else if (errAfterSet != 0) {
-        sprintf_s(dbg, "[ChineseIME] SetWindowLongPtr error: %d\n", errAfterSet);
-        OutputDebugStringA(dbg);
+    HKL hkl = GetKeyboardLayout(0);
+    if (hkl) {
+        LANGID langId = LOWORD(reinterpret_cast<DWORD_PTR>(hkl));
+        chineseime::InputMethodType type = DetectInputMethodTypeFromHkl(hkl);
+        chineseime::ImeStateManager::get().updateInputMethod(type);
+        chineseime::ImeStateManager::get().updateChineseMode(IsChineseLangId(langId));
+        chineseime::ImeStateManager::get().updateImeOpen(IsChineseLangId(langId));
     }
 
-    if (errAfterSet != 0) {
-        g_originalWndProc = NULL;
-        g_hwnd = NULL;
-        return 0;
-    }
+    g_pollingRunning.store(true);
+    g_pollingThread = std::thread([]() {
+        DEBUG_LOG_SIMPLE("[ChineseIME] Polling thread started\n");
+        PollKeyboardState();
+        PollIMEState();
+        {
+            auto initialState = chineseime::ImeStateManager::get().getSnapshot();
+            bool isChineseIM = initialState.inputMethodType != chineseime::InputMethodType::ENGLISH &&
+                initialState.inputMethodType != chineseime::InputMethodType::UNKNOWN;
+            char buf[256];
+            sprintf_s(buf, "[ChineseIME] Init: IME=%d, CMode=%d, Caps=%d, ShiftM=%d\n",
+                (int)initialState.inputMethodType, initialState.chineseMode ? 1 : 0,
+                initialState.capsLockOn ? 1 : 0, (isChineseIM && !initialState.chineseMode && initialState.imeOpen) ? 1 : 0);
+            OutputDebugStringA(buf);
+            chineseime::onImeStateChanged(static_cast<int>(initialState.inputMethodType), initialState.chineseMode);
+            chineseime::onKeyboardStateChanged(initialState.capsLockOn ? 1 : 0,
+                (isChineseIM && !initialState.chineseMode && initialState.imeOpen) ? 1 : 0);
+        }
+        while (g_pollingRunning.load()) {
+            PollKeyboardState();
+            PollIMEState();
 
-    g_hwnd = h;
-    g_hookInstalled = true;
-    g_himc = ImmGetContext(h);
-    if (g_himc) {
-        ImmReleaseContext(h, g_himc);
-    } else {
-        g_himc = ImmCreateContext();
-    }
-    sprintf_s(dbg, "[ChineseIME] Hook success, hwnd=0x%IX, oldProc=0x%IX\n", (UINT64)h, (UINT64)oldProc);
-    OutputDebugStringA(dbg);
+            auto changes = chineseime::ImeStateManager::get().checkChanges();
+            auto state = chineseime::ImeStateManager::get().getSnapshot();
+
+            if (changes.inputMethodChanged || changes.chineseModeChanged) {
+                char buf[256];
+                sprintf_s(buf, "[ChineseIME] State: IME=%d, CMode=%d\n",
+                    (int)state.inputMethodType, state.chineseMode ? 1 : 0);
+                OutputDebugStringA(buf);
+                chineseime::onImeStateChanged(static_cast<int>(state.inputMethodType), state.chineseMode);
+            }
+
+            if (changes.candidatesChanged || changes.compositionChanged) {
+                std::vector<const wchar_t*> ptrs;
+                for (const auto& c : state.candidates) {
+                    ptrs.push_back(c.c_str());
+                }
+                char buf[256];
+                sprintf_s(buf, "[ChineseIME] Candidates: comp='%S', count=%d\n",
+                    state.composition.c_str(), (int)ptrs.size());
+                OutputDebugStringA(buf);
+                chineseime::onCandidateChanged(
+                    state.composition.c_str(),
+                    ptrs.empty() ? nullptr : ptrs.data(),
+                    static_cast<int>(ptrs.size()),
+                    state.selectedIndex
+                );
+            }
+
+            if (changes.capsLockChanged || changes.shiftModeChanged) {
+                bool inShiftMode = (state.inputMethodType != chineseime::InputMethodType::ENGLISH &&
+                    state.inputMethodType != chineseime::InputMethodType::UNKNOWN &&
+                    !state.chineseMode);
+                char buf[256];
+                sprintf_s(buf, "[ChineseIME] Kbd: Caps=%d, ShiftM=%d\n",
+                    state.capsLockOn ? 1 : 0, inShiftMode ? 1 : 0);
+                OutputDebugStringA(buf);
+                chineseime::onKeyboardStateChanged(state.capsLockOn ? 1 : 0, inShiftMode ? 1 : 0);
+            }
+
+            Sleep(16);
+        }
+        DEBUG_LOG_SIMPLE("[ChineseIME] Polling thread stopped\n");
+    });
     return 1;
 }
 
-__declspec(dllexport) void UnhookWindowProc() {
-    if (g_hookInstalled && g_hwnd) {
-        if (g_originalWndProc) {
-            SetWindowLongPtr(g_hwnd, GWLP_WNDPROC, (LONG_PTR)g_originalWndProc);
-        }
-        g_originalWndProc = NULL;
-        g_hwnd = NULL;
-        g_hookInstalled = false;
-    }
-    if (g_messageHook) {
-        UnhookWindowsHookEx(g_messageHook);
-        g_messageHook = NULL;
-    }
-    if (g_callWndProcHook) {
-        UnhookWindowsHookEx(g_callWndProcHook);
-        g_callWndProcHook = NULL;
+__declspec(dllexport) void StopTsfListen(void) {
+    g_pollingRunning.store(false);
+
+    if (g_pollingThread.joinable()) {
+        std::thread tmpThread = std::move(g_pollingThread);
+        tmpThread.detach();
     }
 }
 
-__declspec(dllexport) int InstallMessageHook(ULONG_PTR hwnd) {
-    if (!hwnd) return 0;
-    HWND h = (HWND)hwnd;
-    if (!IsWindow(h)) return 0;
-
-    g_hwnd = h;
-
-    if (g_messageHook) {
-        UnhookWindowsHookEx(g_messageHook);
-        g_messageHook = NULL;
-    }
-    if (g_callWndProcHook) {
-        UnhookWindowsHookEx(g_callWndProcHook);
-        g_callWndProcHook = NULL;
-    }
-
-    g_callWndProcHook = SetWindowsHookEx(WH_CALLWNDPROC, MessageCallWndProc, NULL, GetCurrentThreadId());
-    if (g_callWndProcHook) {
-        OutputDebugStringA("[ChineseIME] WH_CALLWNDPROC hook installed\n");
-    } else {
-        char dbg[128];
-        sprintf_s(dbg, "[ChineseIME] WH_CALLWNDPROC hook failed, error=%d\n", GetLastError());
-        OutputDebugStringA(dbg);
-    }
-
-    g_messageHook = SetWindowsHookEx(WH_GETMESSAGE, MessageGetMsgProc, NULL, GetCurrentThreadId());
-    if (g_messageHook) {
-        g_hookInstalled = true;
-        OutputDebugStringA("[ChineseIME] WH_GETMESSAGE hook installed\n");
-        return 1;
-    } else {
-        char dbg[128];
-        sprintf_s(dbg, "[ChineseIME] WH_GETMESSAGE hook failed, error=%d\n", GetLastError());
-        OutputDebugStringA(dbg);
-        return 0;
-    }
+__declspec(dllexport) int IsTsfListening(void) {
+    return g_tsfInitialized.load() ? 1 : 0;
 }
 
-__declspec(dllexport) void SetEventCallbacks(
-    void* preedit, void* commit, void* candidates, void* imeChange, void* keyboard) {
-    setJavaCallbacks(
-        (void(*)(const wchar_t*, int, int))preedit,
-        (void(*)(const wchar_t*))commit,
-        (void(*)(const wchar_t**, int, int))candidates,
-        (void(*)(int, int))imeChange
-    );
-}
-
-__declspec(dllexport) int GetCompositionString(wchar_t* buffer, int bufferSize) {
-    if (!buffer || bufferSize <= 0) return 0;
-
-    {
-        auto state = chineseime::ImeStateManager::get().getSnapshot();
-        if (!state.composition.empty()) {
-            int len = (int)state.composition.size();
-            if (len >= bufferSize) len = bufferSize - 1;
-            wcsncpy_s(buffer, bufferSize, state.composition.c_str(), len);
-            buffer[len] = 0;
-            return len;
-        }
-    }
-
-    HWND hwndToTry = g_hwnd;
-    if (!hwndToTry || !IsWindow(hwndToTry)) {
-        hwndToTry = GetForegroundWindow();
-    }
-    if (!hwndToTry) return 0;
-
-    HIMC himc = ImmGetContext(hwndToTry);
-    if (!himc) {
-        HWND fgWnd = GetForegroundWindow();
-        if (fgWnd && fgWnd != hwndToTry) {
-            himc = ImmGetContext(fgWnd);
-            if (himc) {
-                hwndToTry = fgWnd;
-            }
-        }
-        if (!himc) return 0;
-    }
-
-    LONG len = ImmGetCompositionStringW(himc, GCS_COMPSTR, NULL, 0);
-    if (len > 0 && len <= bufferSize * (LONG)sizeof(wchar_t)) {
-        ImmGetCompositionStringW(himc, GCS_COMPSTR, buffer, len);
-        ImmReleaseContext(hwndToTry, himc);
-        return len / sizeof(wchar_t);
-    }
-    ImmReleaseContext(hwndToTry, himc);
-    return 0;
-}
-
-__declspec(dllexport) int GetCandidateCount() {
-    auto state = chineseime::ImeStateManager::get().getSnapshot();
-    if (!state.candidates.empty()) {
-        return (int)state.candidates.size();
-    }
-
+__declspec(dllexport) int GetCandidateCount(void) {
     if (!g_hwnd) return 0;
     HIMC himc = ImmGetContext(g_hwnd);
     if (!himc) return 0;
@@ -591,229 +473,169 @@ __declspec(dllexport) int GetCandidateCount() {
         }
     }
     ImmReleaseContext(g_hwnd, himc);
-    return count;
+    return (int)count;
+}
+
+__declspec(dllexport) int GetCompositionString(wchar_t* buffer, int bufferSize) {
+    if (!buffer || bufferSize <= 0) return 0;
+
+    auto state = chineseime::ImeStateManager::get().getSnapshot();
+    if (!state.composition.empty()) {
+        int len = std::min(bufferSize - 1, (int)state.composition.size());
+        wcsncpy_s(buffer, bufferSize, state.composition.c_str(), len);
+        buffer[len] = 0;
+        return len;
+    }
+    return 0;
 }
 
 __declspec(dllexport) int GetCandidate(int index, wchar_t* buffer, int bufferSize) {
     if (!buffer || bufferSize <= 0) return 0;
-
-    {
-        auto state = chineseime::ImeStateManager::get().getSnapshot();
-        if (index >= 0 && index < (int)state.candidates.size()) {
-            const std::wstring& cand = state.candidates[index];
-            int len = (int)cand.size();
-            if (len >= bufferSize) len = bufferSize - 1;
-            wcsncpy_s(buffer, bufferSize, cand.c_str(), len);
-            buffer[len] = 0;
-            return len;
-        }
-    }
-
-    if (!g_hwnd) return 0;
-    HIMC himc = ImmGetContext(g_hwnd);
-    if (!himc) return 0;
-
-    DWORD bufSize = ImmGetCandidateListW(himc, 0, NULL, 0);
-    if (bufSize > 0) {
-        std::vector<char> buf(bufSize);
-        CANDIDATELIST* candList = (CANDIDATELIST*)buf.data();
-        if (ImmGetCandidateListW(himc, 0, candList, bufSize) > 0) {
-            if (index >= 0 && index < (int)candList->dwCount) {
-                wchar_t* pStr = (wchar_t*)(buf.data() + candList->dwOffset[index]);
-                int len = wcslen(pStr);
-                if (len >= bufferSize) len = bufferSize - 1;
-                wcsncpy_s(buffer, bufferSize, pStr, len);
-                buffer[len] = 0;
-                ImmReleaseContext(g_hwnd, himc);
-                return len;
-            }
-        }
-    }
-    ImmReleaseContext(g_hwnd, himc);
-    return 0;
-}
-
-__declspec(dllexport) int GetSelectedCandidateIndex() {
     auto state = chineseime::ImeStateManager::get().getSnapshot();
-    if (!state.candidates.empty()) {
-        return state.selectedIndex;
+    if (index >= 0 && index < (int)state.candidates.size()) {
+        const std::wstring& cand = state.candidates[index];
+        int len = std::min(bufferSize - 1, (int)cand.size());
+        wcsncpy_s(buffer, bufferSize, cand.c_str(), len);
+        buffer[len] = 0;
+        return len;
     }
-
-    if (!g_hwnd) return 0;
-    HIMC himc = ImmGetContext(g_hwnd);
-    if (!himc) return 0;
-    int selIdx = 0;
-    DWORD bufSize = ImmGetCandidateListW(himc, 0, NULL, 0);
-    if (bufSize > 0) {
-        std::vector<char> buf(bufSize);
-        CANDIDATELIST* candList = (CANDIDATELIST*)buf.data();
-        if (ImmGetCandidateListW(himc, 0, candList, bufSize) > 0) {
-            selIdx = candList->dwSelection;
-        }
-    }
-    ImmReleaseContext(g_hwnd, himc);
-    return selIdx;
-}
-
-__declspec(dllexport) int GetImeOpenStatus() {
-    {
-        auto state = chineseime::ImeStateManager::get().getSnapshot();
-        if (state.isValid) {
-            return state.imeOpen ? 1 : 0;
-        }
-    }
-    
-    if (!g_hwnd) return 0;
-    DWORD threadId = GetWindowThreadProcessId(g_hwnd, NULL);
-    DWORD currentThreadId = GetCurrentThreadId();
-    BOOL attached = FALSE;
-    if (threadId != currentThreadId) {
-        attached = AttachThreadInput(currentThreadId, threadId, TRUE);
-    }
-    HIMC himc = ImmGetContext(g_hwnd);
-    if (himc) {
-        int open = ImmGetOpenStatus(himc);
-        ImmReleaseContext(g_hwnd, himc);
-        if (attached) AttachThreadInput(currentThreadId, threadId, FALSE);
-        return open;
-    }
-    if (attached) AttachThreadInput(currentThreadId, threadId, FALSE);
     return 0;
 }
 
-__declspec(dllexport) int GetChineseMode() {
-    {
-        auto state = chineseime::ImeStateManager::get().getSnapshot();
-        if (state.isValid) {
-            return state.chineseMode ? 1 : 0;
-        }
+__declspec(dllexport) int GetSelectedCandidateIndex(void) {
+    return chineseime::ImeStateManager::get().getSnapshot().selectedIndex;
+}
+
+__declspec(dllexport) int GetImeOpenStatus(void) {
+    return chineseime::ImeStateManager::get().getSnapshot().imeOpen ? 1 : 0;
+}
+
+__declspec(dllexport) int GetTsfChineseMode(void) {
+    return chineseime::ImeStateManager::get().getSnapshot().chineseMode ? 1 : 0;
+}
+
+__declspec(dllexport) int HasTsfLayoutChanged(void) {
+    return chineseime::ImeStateManager::get().checkLayoutChanged() ? 1 : 0;
+}
+
+__declspec(dllexport) int GetInputMethodType(void) {
+    return (int)chineseime::ImeStateManager::get().getSnapshot().inputMethodType;
+}
+
+__declspec(dllexport) int GetShiftMode(void) {
+    auto state = chineseime::ImeStateManager::get().getSnapshot();
+    bool isChineseInputMethod = state.inputMethodType != chineseime::InputMethodType::ENGLISH &&
+        state.inputMethodType != chineseime::InputMethodType::UNKNOWN;
+    bool inShiftMode = isChineseInputMethod && !state.chineseMode && state.imeOpen;
+    return inShiftMode ? 1 : 0;
+}
+
+__declspec(dllexport) int GetKeyboardStateForPolling(int vKey) {
+    BYTE keyboardState[256];
+    if (GetKeyboardState(keyboardState)) {
+        return (keyboardState[vKey] & 0x80) ? 1 : 0;
     }
-    
-    if (!g_hwnd) return 0;
-    DWORD threadId = GetWindowThreadProcessId(g_hwnd, NULL);
-    DWORD currentThreadId = GetCurrentThreadId();
-    BOOL attached = FALSE;
-    if (threadId != currentThreadId) {
-        attached = AttachThreadInput(currentThreadId, threadId, TRUE);
-    }
-    HIMC himc = ImmGetContext(g_hwnd);
-    if (himc) {
-        DWORD conversion = 0, sentence = 0;
-        ImmGetConversionStatus(himc, &conversion, &sentence);
-        ImmReleaseContext(g_hwnd, himc);
-        if (attached) AttachThreadInput(currentThreadId, threadId, FALSE);
-        return (conversion & IME_CMODE_NATIVE) ? 1 : 0;
-    }
-    if (attached) AttachThreadInput(currentThreadId, threadId, FALSE);
     return 0;
 }
 
-__declspec(dllexport) int GetShiftMode() {
-    int open = GetImeOpenStatus();
-    int chinese = GetChineseMode();
-    return (open && !chinese) ? 1 : 0;
+__declspec(dllexport) void SetTargetWindow(void* hwnd) {
+    g_targetWindow = hwnd ? reinterpret_cast<HWND>(hwnd) : nullptr;
 }
 
-__declspec(dllexport) int GetCapsLockState() {
-    return (GetKeyState(VK_CAPITAL) & 0x01) ? 1 : 0;
+__declspec(dllexport) void RefreshImeState(void) {
+    PollKeyboardState();
+    PollIMEState();
 }
 
-// ── GetInputMethodType: unified HKL detection ──
-// Priority: ImeStateManager (TSF/event-driven) → Foreground window HKL → Hooked window HKL
-
-static int detectTypeFromHklInternal(HKL hkl) {
-    if (!hkl) return 0;
-    using namespace chineseime;
-    DWORD_PTR val = (DWORD_PTR)hkl;
-    LANGID langId = LOWORD(val);
-    if (!IsChineseLangId(langId)) return static_cast<int>(InputMethodType::ENGLISH);
-    return static_cast<int>(detectInputMethodTypeFromHkl(hkl));
+__declspec(dllexport) void FreeBuffer(void* ptr) {
+    if (ptr) CoTaskMemFree(ptr);
 }
 
-__declspec(dllexport) int GetInputMethodType() {
-        {
-            auto state = chineseime::ImeStateManager::get().getSnapshot();
-            if (state.inputMethodType != chineseime::InputMethodType::UNKNOWN) {
-                return static_cast<int>(state.inputMethodType);
-            }
+__declspec(dllexport) const char* GetDllVersion(void) {
+    return VERSION;
+}
+
+__declspec(dllexport) int HasLayoutChanged(void) {
+    return chineseime::ImeStateManager::get().checkLayoutChanged() ? 1 : 0;
+}
+
+__declspec(dllexport) void SetEventCallbacks(
+    void* preedit,
+    void* commit,
+    void* candidate,
+    void* imeChange,
+    void* keyboard) {
+    g_preeditCallback = reinterpret_cast<PreeditCallback>(preedit);
+    g_commitCallback = reinterpret_cast<CommitCallback>(commit);
+    g_candidateCallback = reinterpret_cast<CandidateCallback>(candidate);
+    g_imeChangeCallback = reinterpret_cast<ImeChangeCallback>(imeChange);
+    g_keyboardCallback = reinterpret_cast<KeyboardCallback>(keyboard);
+
+    chineseime::WinEventBridge::get().setCallbacks({
+        [preedit](const wchar_t* text, int cursorPos, int selStart, int selLen) {
+            if (g_preeditCallback) g_preeditCallback(text, cursorPos, selStart, selLen);
+        },
+        [commit](const wchar_t* text) {
+            if (g_commitCallback) g_commitCallback(text);
+        },
+        [candidate](const wchar_t** cands, int count, int selIdx) {
+            if (g_candidateCallback) g_candidateCallback(cands, count, selIdx);
+        },
+        [](int imeType, int cmode) {
+            if (g_imeChangeCallback) g_imeChangeCallback(imeType, cmode);
+        },
+        [](int caps, int shift) {
+            if (g_keyboardCallback) g_keyboardCallback(caps, shift);
         }
+    });
 
-        HWND fgWnd = GetForegroundWindow();
-        if (fgWnd) {
-            HKL hkl = GetKeyboardLayout(GetWindowThreadProcessId(fgWnd, NULL));
-            if (hkl) {
-                // Update ImeStateManager with HKL state for better consistency
-                chineseime::ImeStateManager::get().updateHklState((LONG_PTR)hkl);
-                int t = detectTypeFromHklInternal(hkl);
-                if (t > 0) return t;
-            }
-        }
-
-        if (g_hwnd) {
-            HKL hkl = GetKeyboardLayout(GetWindowThreadProcessId(g_hwnd, NULL));
-            if (!hkl) hkl = GetKeyboardLayout(0);
-            if (hkl) {
-                // Update ImeStateManager with HKL state for better consistency
-                chineseime::ImeStateManager::get().updateHklState((LONG_PTR)hkl);
-                return detectTypeFromHklInternal(hkl);
-            }
-        }
-
-        return static_cast<int>(chineseime::InputMethodType::ENGLISH);
+    OutputDebugStringA("[ChineseIME] Event callbacks registered\n");
 }
 
-__declspec(dllexport) int IsWindowHooked() {
-    return g_hookInstalled ? 1 : 0;
-}
+__declspec(dllexport) void HookWindowProc(void* hwnd) {
+    char dbg[128];
+    sprintf_s(dbg, "[ChineseIME] HookWindowProc called with hwnd=0x%llX\n", (unsigned long long)hwnd);
+    OutputDebugStringA(dbg);
 
-__declspec(dllexport) int IsWindowValid(HWND hwnd) {
-    return ::IsWindow(hwnd) ? 1 : 0;
-}
+    HWND h = hwnd ? reinterpret_cast<HWND>(hwnd) : nullptr;
+    sprintf_s(dbg, "[ChineseIME] HookWindowProc: HWND from void* = 0x%p\n", (void*)h);
+    OutputDebugStringA(dbg);
 
-__declspec(dllexport) void RefreshCandidates() {
-    if (g_hwnd) {
-        HIMC himc = ImmGetContext(g_hwnd);
-        if (himc) {
-            DWORD bufSize = ImmGetCandidateListW(himc, 0, NULL, 0);
-            if (bufSize > 0) {
-                std::vector<char> buf(bufSize);
-                CANDIDATELIST* candList = (CANDIDATELIST*)buf.data();
-                if (ImmGetCandidateListW(himc, 0, candList, bufSize) > 0 && candList->dwCount > 0) {
-                    std::vector<std::wstring> cands;
-                    DWORD count = candList->dwCount > 9 ? 9 : candList->dwCount;
-                    for (DWORD i = 0; i < count; i++) {
-                        wchar_t* pStr = (wchar_t*)(buf.data() + candList->dwOffset[i]);
-                        cands.push_back(pStr);
-                    }
-                    std::vector<const wchar_t*> ptrs;
-                    for (auto& c : cands) ptrs.push_back(c.c_str());
-                    int selIdx = (int)candList->dwSelection;
-                    if (selIdx >= (int)count) selIdx = (int)count - 1;
-                    if (g_javaCandidates) {
-                        g_javaCandidates(ptrs.data(), (int)ptrs.size(), selIdx);
-                    }
-                }
-            }
-            ImmReleaseContext(g_hwnd, himc);
-        }
+    if (h) {
+        SetTargetWindow(hwnd);
+        sprintf_s(dbg, "[ChineseIME] HookWindowProc: calling hookWindow\n");
+        OutputDebugStringA(dbg);
     }
+    chineseime::WinEventBridge::get().hookWindow(h);
+    sprintf_s(dbg, "[ChineseIME] HookWindowProc: hookWindow returned, hooked=%d\n",
+        chineseime::WinEventBridge::get().isHooked() ? 1 : 0);
+    OutputDebugStringA(dbg);
+}
+
+__declspec(dllexport) void UnhookWindowProc(void) {
+    chineseime::WinEventBridge::get().unhookWindow();
+}
+
+__declspec(dllexport) void RefreshCandidates(void) {
+    chineseime::WinEventBridge::get().refreshCandidates();
+}
+
+__declspec(dllexport) int IsWindowHooked(void) {
+    return chineseime::WinEventBridge::get().isHooked() ? 1 : 0;
 }
 
 } // extern "C"
 
-BOOL APIENTRY DllMain(HMODULE, DWORD reason, LPVOID) {
-    if (reason == DLL_PROCESS_DETACH) {
-        if (g_hwnd && g_originalWndProc) {
-            SetWindowLongPtr(g_hwnd, GWLP_WNDPROC, (LONG_PTR)g_originalWndProc);
-        }
-        if (g_messageHook) {
-            UnhookWindowsHookEx(g_messageHook);
-            g_messageHook = NULL;
-        }
-        if (g_callWndProcHook) {
-            UnhookWindowsHookEx(g_callWndProcHook);
-            g_callWndProcHook = NULL;
-        }
+BOOL APIENTRY DllMain(HMODULE hModule, DWORD ul_reason_for_call, LPVOID) {
+    switch (ul_reason_for_call) {
+    case DLL_PROCESS_ATTACH:
+        DisableThreadLibraryCalls(hModule);
+        DEBUG_LOG_SIMPLE("[ChineseIME] DLL loaded\n");
+        break;
+    case DLL_PROCESS_DETACH:
+        StopTsfListen();
+        DEBUG_LOG_SIMPLE("[ChineseIME] DLL unloaded\n");
+        break;
     }
     return TRUE;
 }
