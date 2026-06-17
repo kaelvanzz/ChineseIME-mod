@@ -25,6 +25,7 @@ public class WindowsIMEBridgeNative {
     private boolean prevHudShown = false;
     private boolean wasInEnglishMode = false;
     private int ticksSinceModeSwitch = 0;
+    private boolean hooked = false;
 
     public WindowsIMEBridgeNative(CandidateHud candidateHud) {
         this.candidateHud = candidateHud;
@@ -113,7 +114,6 @@ public class WindowsIMEBridgeNative {
                 }
             }
         }
-    }
 
         tickCounter++;
         if (tickCounter % 600 == 0 || (tickCounter % 60 == 0 && !candidates.isEmpty())) {

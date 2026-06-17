@@ -72,9 +72,8 @@ public class NativeImeBridge {
         INSTANCE.SetCallbacks(candidateCallback, layoutCallback, modeCallback, keyboardCallback);
     }
 
-    private static Path cachedDllPath = null;
 
-    public static synchronized NativeLibrary getInstance() {
+    public static synchronized boolean getInstance() {
         if (!loadAttempted) {
             loadAttempted = true;
             loadNative();
@@ -115,59 +114,7 @@ private static void loadNative() {
         e.printStackTrace();
         loaded = false;
     }
-
-    public interface PreeditCallback extends Callback {
-        void invoke(Pointer text, int cursor, int selLen);
-    }
-
-    public interface CommitCallback extends Callback {
-        void invoke(Pointer text);
-    }
-
-    public interface CandidatesCallback extends Callback {
-        void invoke(Pointer candidates, int count, int selectedIndex);
-    }
-
-    public interface ImeChangeCallback extends Callback {
-        void invoke(int imeType, int chineseMode);
-    }
-
-    public static void hookWindowProc(long hwnd) {
-        if (!isAvailable()) return;
-        try {
-            int result = INSTANCE.HookWindowProcRaw(hwnd);
-            ChineseIMEInitializer.LOGGER.info("[ChineseIME] HookWindowProcRaw result: {}", result);
-        } catch (Exception e) {
-            ChineseIMEInitializer.LOGGER.warn("[ChineseIME] HookWindowProc failed: {}", e.getMessage());
-        }
-    }
-
-    public static void registerCallbacks(PreeditCallback preedit, CommitCallback commit,
-            CandidatesCallback candidates, ImeChangeCallback imeChange) {
-        if (!isAvailable()) return;
-        try {
-            INSTANCE.SetEventCallbacks(preedit, commit, candidates, imeChange);
-            ChineseIMEInitializer.LOGGER.info("[ChineseIME] IME callbacks registered");
-        } catch (Exception e) {
-            ChineseIMEInitializer.LOGGER.warn("[ChineseIME] Failed to register callbacks: {}", e.getMessage());
-        }
-    }
-
-    public static void unhookWindowProc() {
-        if (isAvailable()) {
-            INSTANCE.UnhookWindowProc();
-        }
-    }
-
-    public static boolean isWindowHooked() {
-        return isAvailable() && INSTANCE.IsWindowHooked() == 1;
-    }
-
-    public static void refreshCandidates() {
-        if (isAvailable()) {
-            INSTANCE.RefreshCandidates();
-        }
-    }
+}
 
     public static String getCompositionString() {
         if (!isAvailable()) return "";
@@ -238,6 +185,22 @@ private static void loadNative() {
             KeyboardCallback keyboard) {
         if (!isAvailable()) return;
         INSTANCE.SetEventCallbacks(preedit, commit, candidate, imeChange, keyboard);
+    }
+
+    public static void startListening(long hwnd) {
+        if (!isAvailable()) return;
+        Pointer hwndPtr = hwnd != 0L ? Pointer.createConstant(hwnd) : null;
+        INSTANCE.StartListen(hwndPtr);
+    }
+
+    public static int startTsfListening() {
+        if (!isAvailable()) return 0;
+        return INSTANCE.StartTsfListen();
+    }
+
+    public static void refreshImeState() {
+        if (!isAvailable()) return;
+        INSTANCE.RefreshImeState();
     }
 
     public static void hookWindowProc(long hwnd) {
