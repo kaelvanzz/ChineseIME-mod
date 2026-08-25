@@ -14,22 +14,13 @@
 extern "C" {
 #endif
 
-// Lifecycle
-CHINESEIME_API int StartListen(void* hwnd);
-CHINESEIME_API void StopListen(void);
-CHINESEIME_API int IsListening(void);
-
-// State query (legacy WinEvent hook)
-CHINESEIME_API int IsChineseMode(void);
-CHINESEIME_API int HasLayoutChanged(void);
-// CHINESEIME_API must not be used here because the function uses __declspec(dllexport) directly
-__declspec(dllexport) long GetKeyboardLayoutHKL(void);
 CHINESEIME_API const wchar_t* GetDllVersion(void);
 
-// TSF-based IME data (new API)
+// TSF lifecycle. All TSF/COM work runs on the native STA thread.
 CHINESEIME_API int StartTsfListen(void);
 CHINESEIME_API void StopTsfListen(void);
 CHINESEIME_API int IsTsfListening(void);
+CHINESEIME_API void RefreshImeState(void);
 
 // Get composition string (UTF-16, caller must free with FreeBuffer)
 // Returns: length in wchar_t (not bytes), or 0 if no composition
@@ -42,37 +33,25 @@ CHINESEIME_API int GetSelectedCandidateIndex(void);
 
 // Get cached state
 CHINESEIME_API int GetImeOpenStatus(void);
-CHINESEIME_API int GetTsfChineseMode(void);
-CHINESEIME_API int HasTsfLayoutChanged(void);
 
 // Get input method type
 // Returns: 0=Unknown, 1=English, 2=Pinyin, 3=Zhuyin, 4=Cangjie, 5=Wubi, 6=OtherChinese
 CHINESEIME_API int GetInputMethodType(void);
 
-// Force refresh (call from Java poll loop)
-CHINESEIME_API void RefreshImeState(void);
-
-// Poll individual key state (for real-time Shift detection)
-CHINESEIME_API int GetKeyboardStateForPolling(int vKey);
-
-// Memory management
-CHINESEIME_API void FreeBuffer(void* ptr);
-
 // Callback registration — SetCallbacks removed (old 4-arg API, replaced by SetEventCallbacks)
 
 // Event-driven API (WndProc hook for IME events)
-CHINESEIME_API void HookWindowProc(void* hwnd);
+CHINESEIME_API int HookWindowProc(void* hwnd);
 CHINESEIME_API void UnhookWindowProc(void);
 CHINESEIME_API void RefreshCandidates(void);
 CHINESEIME_API int IsWindowHooked(void);
 
-// Event callbacks registration (for event-driven mode)
+// Event callbacks registration (Windows x64 ABI).
 CHINESEIME_API void SetEventCallbacks(
     void* preeditCallback,
     void* commitCallback,
     void* candidateCallback,
-    void* imeChangeCallback,
-    void* keyboardCallback);
+    void* imeChangeCallback);
 
 #ifdef __cplusplus
 }

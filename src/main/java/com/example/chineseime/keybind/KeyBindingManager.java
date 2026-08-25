@@ -7,6 +7,7 @@ import net.fabricmc.fabric.api.client.keybinding.v1.KeyBindingHelper;
 import net.minecraft.client.MinecraftClient;
 import net.minecraft.client.option.KeyBinding;
 import net.minecraft.client.util.InputUtil;
+import net.minecraft.util.Identifier;
 import org.lwjgl.glfw.GLFW;
 
 import java.util.List;
@@ -27,24 +28,24 @@ public class KeyBindingManager {
     }
 
     public void register() {
-        String cat = "key.categories.chineseime";
+        KeyBinding.Category category = KeyBinding.Category.create(Identifier.of("chineseime", "controls"));
         this.toggleChinese = KeyBindingHelper.registerKeyBinding(new KeyBinding(
                 "key.chineseime.toggle_chinese",
                 InputUtil.Type.KEYSYM,
                 GLFW.GLFW_KEY_COMMA,
-                cat
+                category
         ));
         this.toggleScript = KeyBindingHelper.registerKeyBinding(new KeyBinding(
                 "key.chineseime.toggle_script",
                 InputUtil.Type.KEYSYM,
                 -1,
-                cat
+                category
         ));
         this.openConfig = KeyBindingHelper.registerKeyBinding(new KeyBinding(
                 "key.chineseime.open_config",
                 InputUtil.Type.KEYSYM,
                 GLFW.GLFW_KEY_G,
-                cat
+                category
         ));
     }
 

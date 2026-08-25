@@ -53,6 +53,29 @@ void StaThread::submitTask(Task task) {
     queueCv_.notify_one();
 }
 
+bool StaThread::submitTaskAndWait(Task task, int timeoutMs) {
+    auto done = std::make_shared<std::promise<void>>();
+    auto future = done->get_future();
+    submitTask([task = std::move(task), done]() mutable {
+        try {
+            if (task) task();
+            done->set_value();
+        } catch (...) {
+            done->set_exception(std::current_exception());
+        }
+    });
+
+    if (future.wait_for(std::chrono::milliseconds(timeoutMs)) != std::future_status::ready) {
+        return false;
+    }
+    try {
+        future.get();
+    } catch (...) {
+        return false;
+    }
+    return true;
+}
+
 bool StaThread::waitForReady(int timeoutMs) {
     std::unique_lock<std::mutex> lock(initMutex_);
     return initCv_.wait_for(lock, std::chrono::milliseconds(timeoutMs), 

@@ -20,12 +20,9 @@
     "chineseime.mixins.json"
   ],
   "depends": {
-    "fabricloader": ">=0.16.9",
-    "minecraft": "~1.21.4",
-    "fabric-api": ">=0.110.0",
-    "modmenu": ">=12.0.0"
-  },
-  "recommends": {
-    "cloth-config": ">=15.0.0"
+    "fabricloader": ">=0.19.3",
+    "minecraft": "~1.21.11",
+    "fabric-api": ">=0.141.6+1.21.11",
+    "modmenu": ">=17.0.0"
   }
 }

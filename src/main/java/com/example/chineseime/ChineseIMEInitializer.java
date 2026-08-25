@@ -48,6 +48,7 @@ public class ChineseIMEInitializer implements ClientModInitializer {
     private boolean windowHookAttempted = false;
     private boolean windowHooked = false;
     private long lastKnownHwnd = 0;
+    private int tickCounter = 0;
 
     public interface WINDOWS_API extends Library {
         WINDOWS_API INSTANCE = Native.load("user32", WINDOWS_API.class);
@@ -60,7 +61,7 @@ public class ChineseIMEInitializer implements ClientModInitializer {
         int GetWindowTextA(HWND hWnd, char[] lpString, int nMaxCount);
         int GetWindowTextLength(HWND hWnd);
         void GetWindowText(HWND hWnd, char[] lpString, int nMaxCount);
-        int GetWindowThreadProcessId(HWND hWnd, int[] lpdwProcessId);
+        com.sun.jna.platform.win32.WinDef.DWORD GetWindowThreadProcessId(HWND hWnd, com.sun.jna.platform.win32.WinDef.DWORDByReference lpdwProcessId);
         HWND GetForegroundWindow();
         HWND GetActiveWindow();
     }
@@ -77,6 +78,11 @@ public class ChineseIMEInitializer implements ClientModInitializer {
         this.keyBindingManager.register();
 
         ClientTickEvents.END_CLIENT_TICK.register(client -> {
+            tickCounter++;
+            if (tickCounter % 400 == 0) {
+                config.flush();
+            }
+
             if (!windowHookAttempted && client.isRunning()) {
                 windowHookAttempted = true;
                 if (PlatformIMEManager.getPlatform() == PlatformIMEManager.OS.WINDOWS) {
@@ -86,17 +92,6 @@ public class ChineseIMEInitializer implements ClientModInitializer {
                     long hwnd = findMinecraftWindow();
                     LOGGER.info("[ChineseIME] Found Win32 HWND via EnumWindows: {}", hwnd);
 
-                    // Try GLFW's own HWND extraction
-                    // Note: glfwGetWin32Window may not be available in all Fabric versions
-                    long glfwHwnd = hwnd; // fallback to enum result if GLFW method unavailable
-                    /*long glfwHwnd = GLFW.glfwGetWin32Window(client.getWindow().getHandle());
-                    LOGGER.info("[ChineseIME] GLFW glfwGetWin32Window: {}", glfwHwnd);
-
-                    // Use whichever is valid and non-zero
-                    if (glfwHwnd != 0 && glfwHwnd != hwnd) {
-                        LOGGER.info("[ChineseIME] GLFW HWND differs from EnumWindows, prefer GLFW");
-                        hwnd = glfwHwnd;
-                    }*/
                     lastKnownHwnd = hwnd;
                     if (hwnd != 0) {
                         Object bridge = imeManager.getWindowsBridge();
@@ -121,6 +116,8 @@ public class ChineseIMEInitializer implements ClientModInitializer {
             boolean rightPressed = GLFW.glfwGetKey(window, GLFW.GLFW_KEY_RIGHT) == GLFW.GLFW_PRESS;
             boolean upPressed = GLFW.glfwGetKey(window, GLFW.GLFW_KEY_UP) == GLFW.GLFW_PRESS;
             boolean downPressed = GLFW.glfwGetKey(window, GLFW.GLFW_KEY_DOWN) == GLFW.GLFW_PRESS;
+            boolean bracketLeftPressed = GLFW.glfwGetKey(window, GLFW.GLFW_KEY_LEFT_BRACKET) == GLFW.GLFW_PRESS;
+            boolean bracketRightPressed = GLFW.glfwGetKey(window, GLFW.GLFW_KEY_RIGHT_BRACKET) == GLFW.GLFW_PRESS;
 
             if (this.imeManager.hasInput()) {
                 if ((leftPressed && !prevLeftPressed) || (upPressed && !prevUpPressed)) {
@@ -128,12 +125,19 @@ public class ChineseIMEInitializer implements ClientModInitializer {
                 } else if ((rightPressed && !prevRightPressed) || (downPressed && !prevDownPressed)) {
                     this.imeManager.selectNext();
                 }
+                if (bracketLeftPressed && !prevBracketLeftPressed) {
+                    this.imeManager.prevPage();
+                } else if (bracketRightPressed && !prevBracketRightPressed) {
+                    this.imeManager.nextPage();
+                }
             }
 
             prevLeftPressed = leftPressed;
             prevRightPressed = rightPressed;
             prevUpPressed = upPressed;
             prevDownPressed = downPressed;
+            prevBracketLeftPressed = bracketLeftPressed;
+            prevBracketRightPressed = bracketRightPressed;
 
             boolean ctrl = GLFW.glfwGetKey(window, GLFW.GLFW_KEY_LEFT_CONTROL) == GLFW.GLFW_PRESS ||
                     GLFW.glfwGetKey(window, GLFW.GLFW_KEY_RIGHT_CONTROL) == GLFW.GLFW_PRESS;
@@ -147,23 +151,6 @@ public class ChineseIMEInitializer implements ClientModInitializer {
             } else {
                 this.ctrlShiftTPressed = false;
             }
-
-            boolean bracketLeftPressed = GLFW.glfwGetKey(window, GLFW.GLFW_KEY_LEFT_BRACKET) == GLFW.GLFW_PRESS;
-            boolean bracketRightPressed = GLFW.glfwGetKey(window, GLFW.GLFW_KEY_RIGHT_BRACKET) == GLFW.GLFW_PRESS;
-            if (this.imeManager.hasInput()) {
-                if ((leftPressed && !prevLeftPressed) || (upPressed && !prevUpPressed)) {
-                    this.imeManager.selectPrev();
-                } else if ((rightPressed && !prevRightPressed) || (downPressed && !prevDownPressed)) {
-                    this.imeManager.selectNext();
-                }
-                if (bracketLeftPressed && !prevBracketLeftPressed) {
-                    this.imeManager.prevPage();
-                } else if (bracketRightPressed && !prevBracketRightPressed) {
-                    this.imeManager.nextPage();
-                }
-            }
-            prevBracketLeftPressed = bracketLeftPressed;
-            prevBracketRightPressed = bracketRightPressed;
         });
 
         LOGGER.info("[ChineseIME] Initialization complete! Platform: {}, isWindowsSync: {}", PlatformIMEManager.getPlatform(), this.imeManager.isWindowsSync());
@@ -172,6 +159,7 @@ public class ChineseIMEInitializer implements ClientModInitializer {
     private long findMinecraftWindow() {
         try {
             int currentPid = (int) ProcessHandle.current().pid();
+            LOGGER.info("[ChineseIME] findMinecraftWindow: current PID = {}", currentPid);
 
             final int targetPid = currentPid;
             final List<Long> foundHwnds = new ArrayList<>();
@@ -180,30 +168,37 @@ public class ChineseIMEInitializer implements ClientModInitializer {
             WINDOWS_API.WNDENUMPROC callback = new WINDOWS_API.WNDENUMPROC() {
                 public boolean callback(HWND hWnd, Pointer userData) {
                     try {
-                        int[] pid = new int[1];
-                        WINDOWS_API.INSTANCE.GetWindowThreadProcessId(hWnd, pid);
-                        if (pid[0] == targetPid) {
-                            int length = WINDOWS_API.INSTANCE.GetWindowTextLength(hWnd);
-                            if (length > 0) {
-                                char[] title = new char[length + 1];
-                                WINDOWS_API.INSTANCE.GetWindowText(hWnd, title, length + 1);
-                                String titleStr = new String(title, 0, length);
-                                long hwndVal = Pointer.nativeValue(hWnd.getPointer());
-                                LOGGER.info("[ChineseIME] Found window: '{}' (PID={}, HWND={})", titleStr, pid[0], hwndVal);
+                        WinDef.DWORDByReference processIdRef = new WinDef.DWORDByReference();
+                        WINDOWS_API.INSTANCE.GetWindowThreadProcessId(hWnd, processIdRef);
+                        int processId = (int)processIdRef.getValue().longValue();
+                        long hwndVal = Pointer.nativeValue(hWnd.getPointer());
+                        int length = WINDOWS_API.INSTANCE.GetWindowTextLength(hWnd);
+                        String titleStr = "";
+                        if (length > 0) {
+                            char[] title = new char[length + 1];
+                            WINDOWS_API.INSTANCE.GetWindowText(hWnd, title, length + 1);
+                            titleStr = new String(title, 0, length);
+                        }
+                        LOGGER.debug("[ChineseIME] Enum callback: title='{}', hwnd={}, procId={}, targetPid={}, match={}",
+                            titleStr, hwndVal, processId, targetPid, processId == targetPid);
 
-                                if (titleStr.contains("Minecraft")) {
-                                    minecraftWindowHwnd[0] = hwndVal;
-                                }
+                        if (processId == targetPid) {
+                            if (titleStr.contains("Minecraft")) {
+                                minecraftWindowHwnd[0] = hwndVal;
+                                LOGGER.info("[ChineseIME] Found Minecraft window: hwnd={}", hwndVal);
                             }
-                            foundHwnds.add(Pointer.nativeValue(hWnd.getPointer()));
+                            foundHwnds.add(hwndVal);
                         }
                     } catch (Exception e) {
+                        LOGGER.warn("[ChineseIME] Enum callback exception: {}", e.getMessage());
                     }
                     return true;
                 }
             };
 
+            LOGGER.info("[ChineseIME] Starting EnumWindows...");
             WINDOWS_API.INSTANCE.EnumWindows(callback, null);
+            LOGGER.info("[ChineseIME] EnumWindows complete. Found {} windows in target process", foundHwnds.size());
 
             if (minecraftWindowHwnd[0] != 0) {
                 LOGGER.info("[ChineseIME] Using Minecraft window HWND: {}", minecraftWindowHwnd[0]);

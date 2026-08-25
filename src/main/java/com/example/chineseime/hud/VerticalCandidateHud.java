@@ -281,7 +281,7 @@ public class VerticalCandidateHud {
 
         int panelH = compoH + this.perPage * itemH + pad * 2;
 
-        this.x = scaledW - panelW - margin;
+        this.x = margin;
         int chatInputTop = scaledH - 22 - 14;
         this.y = chatInputTop - 2 - panelH;
         this.width = panelW;

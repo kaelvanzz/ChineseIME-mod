@@ -11,8 +11,8 @@ add_library(chineseime_native SHARED
     src/ime_state_manager.cpp
     src/ime_detector.cpp
     src/tsf_monitor.cpp
-    src/imm32_monitor.cpp
     src/win_event_bridge.cpp
+    src/uia_candidate_provider.cpp
 )
 
 # Include directories
@@ -27,6 +27,7 @@ if(WIN32)
         ole32
         oleaut32
         imm32
+        uiautomationcore
     )
     
     target_compile_definitions(chineseime_native PRIVATE
@@ -36,12 +37,9 @@ if(WIN32)
     )
 endif()
 
-# Output to native/build directory for CI compatibility
+# Output where Gradle packages the DLL into the mod JAR.
 set_target_properties(chineseime_native PROPERTIES
-    RUNTIME_OUTPUT_DIRECTORY_DEBUG ${CMAKE_SOURCE_DIR}/build
-    RUNTIME_OUTPUT_DIRECTORY_RELEASE ${CMAKE_SOURCE_DIR}/build
-    LIBRARY_OUTPUT_DIRECTORY_DEBUG ${CMAKE_SOURCE_DIR}/build
-    LIBRARY_OUTPUT_DIRECTORY_RELEASE ${CMAKE_SOURCE_DIR}/build
-    ARCHIVE_OUTPUT_DIRECTORY_DEBUG ${CMAKE_SOURCE_DIR}/build
-    ARCHIVE_OUTPUT_DIRECTORY_RELEASE ${CMAKE_SOURCE_DIR}/build
+    RUNTIME_OUTPUT_DIRECTORY ${CMAKE_SOURCE_DIR}/../natives
+    LIBRARY_OUTPUT_DIRECTORY ${CMAKE_SOURCE_DIR}/../natives
+    ARCHIVE_OUTPUT_DIRECTORY ${CMAKE_SOURCE_DIR}/../natives
 )

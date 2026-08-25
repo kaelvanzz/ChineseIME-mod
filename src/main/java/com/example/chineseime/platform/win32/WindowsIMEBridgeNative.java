@@ -139,6 +139,9 @@ public class WindowsIMEBridgeNative {
         NativeImeBridge.registerCallbacks(preeditCallback, commitCallback, candidatesCallback, imeChangeCallback);
         ChineseIMEInitializer.LOGGER.info("[ChineseIME] IME callbacks registered");
 
+        int tsfStarted = NativeImeBridge.getInstance().StartTsfListen();
+        ChineseIMEInitializer.LOGGER.info("[ChineseIME] TSF listener started: {}", tsfStarted != 0);
+
         return hooked;
     }
 
@@ -176,6 +179,7 @@ public class WindowsIMEBridgeNative {
 
     public void unhookWindow() {
         if (hooked) {
+            NativeImeBridge.getInstance().StopTsfListen();
             NativeImeBridge.unhookWindowProc();
             hooked = false;
         }
@@ -188,6 +192,43 @@ public class WindowsIMEBridgeNative {
 
     private void handleCommit(String text) {
         if (text == null || text.isEmpty()) return;
+
+        boolean containsChinese = false;
+        boolean containsOnlyLettersAndSpaces = text.matches("^[a-zA-Z'\\s]+$");
+        for (char c : text.toCharArray()) {
+            if ((c >= 0x4E00 && c <= 0x9FFF) || (c >= 0x3400 && c <= 0x4DBF)) {
+                containsChinese = true;
+                break;
+            }
+        }
+
+        // Block if text has no Chinese AND:
+        // 1. We're showing candidates (user should select one), OR
+        // 2. We have an active composition (typing in progress) - IME should not auto-commit
+        // 3. We're in Chinese mode (shift to English should not cause pinyin commit)
+        if (!containsChinese) {
+            if (!currentCandidates.isEmpty()) {
+                ChineseIMEInitializer.LOGGER.warn("[ChineseIME] Commit blocked: text='{}' no Chinese but candidates showing", text);
+                return;
+            }
+            if (!currentComposition.isEmpty()) {
+                ChineseIMEInitializer.LOGGER.warn("[ChineseIME] Commit blocked: text='{}' no Chinese but composition active='{}'", text, currentComposition);
+                return;
+            }
+            if (currentChineseMode) {
+                ChineseIMEInitializer.LOGGER.warn("[ChineseIME] Commit blocked: text='{}' no Chinese but ChineseMode=true", text);
+                return;
+            }
+        }
+
+        // Additional safety: block pure ASCII letter sequences that look like pinyin
+        // These are almost certainly accidental commits
+        if (!containsChinese && containsOnlyLettersAndSpaces && !text.matches(".*[A-Z].*") && text.length() > 1) {
+            // All lowercase letters - likely pinyin
+            ChineseIMEInitializer.LOGGER.warn("[ChineseIME] Commit blocked: text='{}' looks like pinyin", text);
+            return;
+        }
+
         ChineseIMEInitializer.LOGGER.info("[ChineseIME] Commit: {}", text);
         insertTextToChat(text);
         currentComposition = "";
@@ -198,6 +239,7 @@ public class WindowsIMEBridgeNative {
     private void handleCandidates(List<String> candidates, int selectedIndex) {
         boolean changed = !currentCandidates.equals(candidates) || currentSelectedIndex != selectedIndex;
         if (changed) {
+            ChineseIMEInitializer.LOGGER.info("[ChineseIME] handleCandidates: cands={}, selIdx={}", candidates.size(), selectedIndex);
             currentCandidates = new ArrayList<>(candidates);
             currentSelectedIndex = selectedIndex;
             wasInEnglishMode = false;
@@ -236,17 +278,21 @@ public class WindowsIMEBridgeNative {
 
         boolean inEnglishTransition = wasInEnglishMode && ticksSinceModeSwitch < 10;
 
+        String displayComposition = currentComposition;
+        if (displayComposition.contains("'")) {
+            int aposIndex = displayComposition.indexOf("'");
+            if (aposIndex > 0) {
+                displayComposition = displayComposition.substring(0, aposIndex);
+            }
+        }
+
         if (isVerticalLayout && verticalCandidateHud != null) {
             if (!currentCandidates.isEmpty()) {
                 verticalCandidateHud.updateCandidatesKeepSelection(
                     currentCandidates, currentComposition, currentSelectedIndex, verticalCandidateHud.getPage());
             } else if (!currentComposition.isEmpty()) {
-                List<String> fallback = getFallbackCandidates(currentComposition);
-                if (!fallback.isEmpty() && !inEnglishTransition) {
-                    verticalCandidateHud.updateCandidatesKeepSelection(fallback, currentComposition, 0, 0);
-                } else {
-                    verticalCandidateHud.updateCandidatesKeepSelection(new ArrayList<>(), currentComposition, 0, 0);
-                }
+                verticalCandidateHud.updateCandidatesKeepSelection(
+                    new ArrayList<>(), currentComposition, 0, 0);
             } else {
                 verticalCandidateHud.clearInput();
             }
@@ -254,13 +300,14 @@ public class WindowsIMEBridgeNative {
         } else if (candidateHud != null) {
             if (!currentCandidates.isEmpty()) {
                 candidateHud.updateCandidatesKeepSelection(
-                    currentCandidates, currentComposition, currentSelectedIndex, candidateHud.getPage());
+                    currentCandidates, displayComposition, currentSelectedIndex, candidateHud.getPage());
             } else if (!currentComposition.isEmpty()) {
                 List<String> fallback = getFallbackCandidates(currentComposition);
                 if (!fallback.isEmpty() && !inEnglishTransition) {
-                    candidateHud.updateCandidatesKeepSelection(fallback, currentComposition, 0, 0);
+                    candidateHud.updateCandidatesKeepSelection(fallback, displayComposition, 0, 0);
                 } else {
-                    candidateHud.updateCandidatesKeepSelection(new ArrayList<>(), currentComposition, 0, 0);
+                    candidateHud.updateCandidatesKeepSelection(
+                        new ArrayList<>(), currentComposition, 0, 0);
                 }
             } else {
                 candidateHud.clearInput();
@@ -271,7 +318,7 @@ public class WindowsIMEBridgeNative {
 
     private List<String> getFallbackCandidates(String composition) {
         InputMode mode = NativeImeBridge.getInputMethodTypeAsEnum(currentInputMethodType);
-        // ChineseIMEInitializer.LOGGER.info("[ChineseIME] getFallbackCandidates for mode: {}", mode);
+        ChineseIMEInitializer.LOGGER.debug("[ChineseIME] getFallbackCandidates for mode: {}", mode);
 
         switch (mode) {
             case PINYIN:
@@ -316,30 +363,11 @@ public class WindowsIMEBridgeNative {
     public void update() {
         if (!initialized) return;
 
-        long currentTime = System.currentTimeMillis();
-        long pollInterval;
-
-        // Determine polling interval based on IME activity state
+        if (tickCounter % 5 == 0) {
+            NativeImeBridge.refreshImeState();
+        }
         boolean imeOpenCheck = isImeOpen();
         boolean chineseModeCheck = isChineseMode();
-        boolean isActive = imeOpenCheck || chineseModeCheck || !currentComposition.isEmpty() || !currentCandidates.isEmpty();
-        if (isActive) {
-            pollInterval = ACTIVE_POLL_INTERVAL;
-        } else {
-            // Increase polling interval when inactive to save CPU
-            long timeSinceLastUpdate = currentTime - lastUpdateTime;
-            if (timeSinceLastUpdate < INACTIVE_POLL_INTERVAL) {
-                return; // Skip update if not enough time has passed
-            }
-            pollInterval = INACTIVE_POLL_INTERVAL;
-        }
-
-        // Check if enough time has passed since last update
-        if (currentTime - lastUpdateTime < pollInterval) {
-            return;
-        }
-        lastUpdateTime = currentTime;
-
         if (wasInEnglishMode) {
             ticksSinceModeSwitch++;
         }
@@ -372,7 +400,27 @@ public class WindowsIMEBridgeNative {
         }
 
         String pollComposition = NativeImeBridge.getCompositionString();
-        List<String> pollCandidates = NativeImeBridge.getCandidates();
+        int nativeCandidateCount = NativeImeBridge.getCandidateCount();
+        ChineseIMEInitializer.LOGGER.debug("[ChineseIME] Poll: comp='{}', nativeCandCount={}", pollComposition, nativeCandidateCount);
+
+        List<String> pollCandidates = nativeCandidateCount > 0 ? NativeImeBridge.getCandidates() : new ArrayList<>();
+
+        // Fallback: Always try UI Automation when IMM32 returns no candidates
+        // This handles cross-process IME scenarios (like Minecraft with Iris)
+        if (nativeCandidateCount == 0) {
+            ChineseIMEInitializer.LOGGER.debug("[ChineseIME] IMM32 returned 0 candidates, trying UI Automation...");
+            List<String> uiaCandidates = NativeImeBridge.getCandidatesViaUIA();
+            if (!uiaCandidates.isEmpty()) {
+                ChineseIMEInitializer.LOGGER.debug("[ChineseIME] UI Automation found {} candidates", uiaCandidates.size());
+                pollCandidates = uiaCandidates;
+            } else {
+                ChineseIMEInitializer.LOGGER.debug("[ChineseIME] UI Automation found no candidates");
+            }
+        }
+
+        if (nativeCandidateCount > 0 && pollCandidates.isEmpty()) {
+            ChineseIMEInitializer.LOGGER.warn("[ChineseIME] getCandidateCount={} but getCandidates returned empty", nativeCandidateCount);
+        }
         int pollSelectedIndex = NativeImeBridge.getSelectedCandidateIndex();
 
         boolean contentChanged = !currentComposition.equals(pollComposition) || !currentCandidates.equals(pollCandidates);

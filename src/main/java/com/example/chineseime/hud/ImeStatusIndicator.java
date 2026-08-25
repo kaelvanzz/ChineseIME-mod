@@ -106,16 +106,13 @@ public class ImeStatusIndicator {
         int bgColor = this.capsLockOn ? BG_CAPS : BG_NORMAL;
 
         ctx.fill(x, y, x + size, y + size, bgColor);
-        ctx.drawBorder(x, y, size, size, BORDER_COLOR);
+        drawBorder(ctx, x, y, size, size, BORDER_COLOR);
 
         String text = this.getDisplayText();
         int textWidth = font.getWidth(text);
-        float textX = x + (size - textWidth) / 2f;
-        float textY = y + (size - font.fontHeight) / 2f;
-        ctx.getMatrices().push();
-        ctx.getMatrices().translate(textX, textY, 0);
-        ctx.drawText(font, text, 0, 0, TEXT_COLOR, false);
-        ctx.getMatrices().pop();
+        int textX = x + (size - textWidth) / 2;
+        int textY = y + (size - font.fontHeight) / 2;
+        ctx.drawText(font, text, textX, textY, TEXT_COLOR, false);
 
         if (this.inShiftMode) {
             int shiftX = x + size - shiftSize - 1;
@@ -132,5 +129,12 @@ public class ImeStatusIndicator {
 
     public static int getHeight(float scale) {
         return (int)(SIZE_1080P / scale);
+    }
+
+    private static void drawBorder(DrawContext ctx, int x, int y, int width, int height, int color) {
+        ctx.fill(x, y, x + width, y + 1, color);
+        ctx.fill(x, y + height - 1, x + width, y + height, color);
+        ctx.fill(x, y + 1, x + 1, y + height - 1, color);
+        ctx.fill(x + width - 1, y + 1, x + width, y + height - 1, color);
     }
 }

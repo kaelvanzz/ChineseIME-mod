@@ -3,32 +3,39 @@
 ## 关键构建命令
 
 ### 构建 C++ DLL
-```bash
+```powershell
 cd native
-cmake -B build
+# Configure CMake (only needed once or when CMakeLists.txt changes)
+cmake -G "Visual Studio 17 2022" -A x64 -S . -B build
+
+# Build
 cmake --build build --config Release
 # 输出: natives/Release/chineseime_native.dll
 ```
 
 ### 构建 Java 模组
-```bash
-./gradlew.bat clean build
+```powershell
+./gradlew.bat build
 # 输出: build/libs/chineseime-1.0.0.jar
 ```
 
 ### 部署到 Minecraft 实例
 ```powershell
 # Windows PowerShell
-Copy-Item "build\libs\chineseime-1.0.0.jar" "C:\Users\user\AppData\Roaming\PrismLauncher\instances\1.21.4 fabric\minecraft\mods\" -Force
+Copy-Item "build\libs\chineseime-1.0.0.jar" "你的Minecraft mods目录" -Force
 ```
 
 **注意**: DLL 已通过 `build.gradle.kts` 的 `processResources` 任务自动打包到 JAR 的 `META-INF/natives/amd64/` 目录
 
+---
+
 ## 架构要点
 
-### 当前架构：事件驱动 Hook + 多层降级 (2026-05-16)
+### 当前架构：事件驱动 Hook + 多层降级 + UI Automation Fallback (2026-05-24)
 
-**2026-05-16 重构版本 3.0.0**：事件驱动优先 + 多层降级架构
+**问题背景**：Minecraft 在某些环境下（如使用 Iris mod）会运行在独立的进程中，导致 IMM32 API 无法跨进程获取候选词。
+
+**2026-05-24 架构**：
 
 1. **主路径 - WinEventBridge (事件驱动)**:
    - C++ DLL 通过 `SetWindowLongPtr(GWLP_WNDPROC)` hook Minecraft 窗口
@@ -45,33 +52,33 @@ Copy-Item "build\libs\chineseime-1.0.0.jar" "C:\Users\user\AppData\Roaming\Prism
    - 检查 IME 类型、大小写、Shift 模式等状态
    - 更新 HUD 显示
 
-4. **关键修复 (2026-05-16)**:
-   - 移除复杂的 JNA Callback 机制，改用 C-style 函数指针
-   - Java 通过 `hookWindow(long hwnd)` 启动 hook
-   - HWND 获取使用 `EnumWindows` 遍历当前进程窗口
-   - TSF 监听作为 IME 类型检测的补充
+4. **降级路径 3 - UI Automation API** (跨进程候选词获取):
+   - 当 IMM32 返回 0 候选词时，通过 Windows UI Automation API 尝试从目标进程窗口获取候选词
+   - 实现文件: `native/src/uia_candidate_provider.cpp`
+   - 函数: `GetCandidateCountUIA()`, `GetCandidatesViaUIA()`
 
-### WndProc Hook (IMM32)
-`ImeWndProc` 拦截 Windows 消息：
-- `WM_IME_STARTCOMPOSITION` - 输入开始
-- `WM_IME_COMPOSITION` - 组合字符串变化（GCS_COMPSTR/GCS_RESULTSTR）
-- `WM_IME_ENDCOMPOSITION` - 输入结束
-- `WM_IME_NOTIFY` - 候选词变化（IMN_OPENCANDIDATE/CHANGECANDIDATE/CLOSECANDIDATE）
-- `WM_INPUTLANGCHANGE` - 输入法切换
+5. **最终降级 - 内置词典**:
+   - 当所有 Native 方法都失败时，使用 `PinyinDictionary.getSuggestions()` 等内置词典
 
-### 指示器显示逻辑
-- **Shift 指示器**（黄色方块）：中文输入法 && 英文模式时显示
-- 英文模式 = `ImmGetOpenStatus` 返回 0
-- Shift 切换中英文 ↔ IME 打开/关闭状态切换
-- **Caps Lock 指示器**（蓝色背景）：使用 `GetAsyncKeyState(VK_CAPITAL) & 0x01` 检测
-- **输入法类型**：无论中英文模式，始终显示输入法简称（拼/注/仓/速/五）
+### 跨进程问题根因
+
+当 Minecraft 运行在独立进程中时：
+- `ImmGetContext(hwnd)` 返回 NULL（无法获取其他进程的 IME 上下文）
+- 日志显示: `[ChineseIME] GetCandidateCount: ImmGetContext failed`
+- 原因: Windows IME 上下文属于输入法进程，不属于目标窗口进程
+
+**解决方案**：
+- UI Automation API 可以枚举并读取其他进程窗口的 UI 元素
+- 但需要候选词窗口是标准 Win32 控件且可见
+
+---
 
 ## DLL 导出函数 (v3.0.0)
 
 ```cpp
 // 生命周期
 const wchar_t* GetDllVersion();                    // 返回 "3.0.0"
-int HookWindowProc(void* hwnd);                   // 替换窗口过程
+int HookWindowProc(void* hwnd);                     // 替换窗口过程
 int HookWindowProcRaw(ULONG_PTR hwnd);            // Raw 版本，返回成功/失败
 int InstallMessageHook(ULONG_PTR hwnd);           // 安装 WH_GETMESSAGE/WH_CALLWNDPROC hook
 void UnhookWindowProc();                          // 恢复原始窗口过程
@@ -91,15 +98,21 @@ int GetInputMethodType();                         // 返回 IME 类型 (1-6)
 // 候选词
 void RefreshCandidates();
 
+// UI Automation 候选词获取 (跨进程)
+int GetCandidateCountUIA();                       // 通过 UI Automation 获取候选词数量
+int GetCandidatesViaUIA(int maxCandidates, wchar_t(*candidates)[64]);  // 获取候选词列表
+
 // 事件回调注册
 void SetEventCallbacks(
     void* preeditCallback,      // (const wchar_t*, int, int, int)
-    void* commitCallback,        // (const wchar_t*)
-    void* candidateCallback,     // (const wchar_t**, int, int)
-    void* imeChangeCallback,    // (int, int)
-    void* keyboardCallback       // (int, int) - 可选
+    void* commitCallback,      // (const wchar_t*)
+    void* candidateCallback,   // (const wchar_t**, int, int)
+    void* imeChangeCallback,   // (int, int)
+    void* keyboardCallback     // (int, int) - 可选
 );
 ```
+
+---
 
 ## JNA 关键注意事项
 
@@ -117,6 +130,8 @@ Error: The specified procedure could not be found
 **解决方案**：
 - C++: `extern "C"` + `__declspec(dllexport)`
 - Java: 接口继承 `StdCallLibrary`
+
+---
 
 ## IME 类型常量
 
@@ -138,6 +153,8 @@ Error: The specified procedure could not be found
 | 微软仓颉 | 0x0004, 0xE002 |
 | 微软速成 | 0x0005, 0xE003 |
 
+---
+
 ## 版本兼容性
 - Minecraft: 1.21.4
 - Fabric Loader: 0.19.1+
@@ -145,7 +162,10 @@ Error: The specified procedure could not be found
 - Java: 21
 - Windows: 10/11
 
+---
+
 ## 目录结构
+
 ```
 native/src/                    # C++ DLL 源码
 ├── ime_bridge.cpp             # 主入口、Hook、导出函数
@@ -156,6 +176,7 @@ native/src/                    # C++ DLL 源码
 ├── win_event_bridge.cpp       # 窗口事件 Bridge（主事件路径）
 ├── win_event_bridge.h         # EventCallbacks 定义
 ├── sta_thread.cpp             # STA 线程管理
+├── uia_candidate_provider.cpp # UI Automation 候选词获取（跨进程）
 └── common.h                   # 共享类型
 
 src/main/java/com/example/chineseime/
@@ -174,77 +195,50 @@ src/main/java/com/example/chineseime/
     └── CangjieDictionary.java # 内置仓颉引擎
 
 natives/Release/chineseime_native.dll # 输出的 native DLL
+build/libs/chineseime-1.0.0.jar       # 打包后的 mod JAR
 ```
 
-## 核心文件说明
+---
 
-### ime_bridge.cpp - ImeWndProc()
-CocoaInput 风格的 WndProc Hook，拦截 Windows IME 消息：
-```cpp
-LRESULT CALLBACK ImeWndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam) {
-    switch (msg) {
-        case WM_IME_STARTCOMPOSITION: ...
-        case WM_IME_COMPOSITION: {
-            // GCS_RESULTSTR - 提交文本
-            // GCS_COMPSTR - 组合字符串
-            // GCS_CURSORPOS - 光标位置
-            // GCS_COMPATTR - 属性（用于选择长度）
-            ...
-        }
-        case WM_IME_ENDCOMPOSITION: ...
-        case WM_IME_NOTIFY: {
-            // IMN_OPENCANDIDATE/CHANGECANDIDATE/CLOSECANDIDATE
-            ...
-        }
-        case WM_INPUTLANGCHANGE: {
-            // IME 类型切换通知
-            ...
-        }
-    }
-    return CallWindowProc(g_originalWndProc, hWnd, msg, wParam, lParam);
-}
+## 当前问题 (P1 - 未解决)
+
+### 问题 1：候选词同步失败
+
+**现象**：模组显示内置词典的候选词，而非 Windows IME 的候选词
+
+**原因分析**：
+1. Minecraft 窗口可能在独立进程中（特别是使用 Iris mod 时）
+2. `ImmGetContext(hwnd)` 跨进程调用失败，返回 NULL
+3. 日志：`[ChineseIME] GetCandidateCount: ImmGetContext failed`
+4. 即使 UI Automation 也可能无法找到候选词（IME 候选词窗口可能不是标准控件）
+
+**尝试的解决方案**：
+1. ✅ 多窗口 fallback：`g_hwnd` → `GetForegroundWindow()` → `GetActiveWindow()`
+2. ✅ PID 验证：拒绝跨进程 hook（因为不可靠）
+3. ✅ UI Automation API：尝试从目标进程窗口枚举 UI 元素获取候选词
+4. ⏳ UI Automation 仍未成功找到候选词
+
+**DebugView 关键日志**：
+```
+[ChineseIME] Hook attempt, hwnd=200420
+[ChineseIME] Current PID: 13092, Window PID: 6612
+[ChineseIME] REJECTED: Window PID 6612 != Current PID 13092 - cross-process hook unreliable
+[ChineseIME] GetCandidateCount called, g_hwnd=0
+[ChineseIME] GetCandidateCount: g_hwnd invalid, using foreground=4068424
+[ChineseIME] GetCandidateCount: trying hwnd=4068424
+[ChineseIME] GetCandidateCount: ImmGetContext failed
 ```
 
-### win_event_bridge.cpp - WinEventBridge
-事件驱动的核心 Bridge，使用 std::function 回调：
-```cpp
-struct WinEventBridge::EventCallbacks {
-    std::function<void(const wchar_t* text, int cursorPos, int selStart, int selLen)> preeditCallback;
-    std::function<void(const wchar_t* text)> commitCallback;
-    std::function<void(const wchar_t** candidates, int count, int selIdx)> candidateCallback;
-    std::function<void(int layout)> layoutChangeCallback;
-    std::function<void(int inputMethodType, bool chineseMode)> imeModeChangeCallback;
-};
-```
+**下一步可能方案**：
+1. 使用 UI Access (UIAccess) 权限提升来访问其他进程
+2. 实现自定义 IME 注入到目标进程
+3. 使用 Windows Text Input Framework (TIF) 替代方案
 
-### WindowsIMEBridgeNative.java - hookWindow()
-```java
-public boolean hookWindow(long hwnd) {
-    // 尝试 WndProc subclassing
-    NativeImeBridge.hookWindowProc(hwnd);
-    hooked = NativeImeBridge.isWindowHooked();
+### 问题 2：Shift 模式检测
 
-    // 如果失败，尝试 WH_GETMESSAGE hook
-    if (!hooked) {
-        int msgHookResult = NativeImeBridge.getInstance().InstallMessageHook(hwnd);
-        hooked = (msgHookResult != 0);
-    }
+**状态**：待调查
 
-    // 注册回调
-    NativeImeBridge.registerCallbacks(preeditCallback, commitCallback, candidatesCallback, imeChangeCallback);
-    return hooked;
-}
-```
-
-### ChineseIMEInitializer.java - findMinecraftWindow()
-通过 `EnumWindows` 遍历所有窗口，找到属于当前进程的窗口：
-```java
-private long findMinecraftWindow() {
-    int currentPid = (int) ProcessHandle.current().pid();
-    // EnumWindows 遍历所有窗口，找到 PID 匹配的
-    // 返回第一个包含 "Minecraft" 标题的窗口
-}
-```
+---
 
 ## 调试日志
 
@@ -261,68 +255,77 @@ private long findMinecraftWindow() {
 [ChineseIME] Window hook result: true
 ```
 
-### 运行日志（正常）
+### 跨进程场景日志
 ```
-[ChineseIME] Poll: IME=LATIN(1), CMode=false, Caps=false, ShiftM=false, ImeOpen=false, CandCnt=0, Comp=''
-[ChineseIME] Indicator: IME=拼, CapsLock=false, ShiftMode=false, ChineseMode=false
+[ChineseIME] Hook attempt, hwnd=200420
+[ChineseIME] Current PID: 36788, Window PID: 6612
+[ChineseIME] REJECTED: Window PID 6612 != Current PID 36788 - cross-process hook unreliable
+[ChineseIME] InstallMessageHook: hwnd=200420
+[ChineseIME] InstallMessageHook REJECTED: Window PID 6612 != Current PID 36788
+[ChineseIME] GetCandidateCount called, g_hwnd=0
+[ChineseIME] Poll: comp='', nativeCandCount=0
+[ChineseIME] IMM32 returned 0 candidates, trying UI Automation...
+[ChineseIME] GetCandidateCountUIA: called
+[ChineseIME] GetCandidateCountUIA: fgPid=6612, currentPid=36788
+[ChineseIME] GetCandidateCountUIA: no candidates found in process 6612
 ```
 
-### 调试建议
-1. 检查日志确认 `Hooked window: true`
-2. 如果 `Hooked window: false`，检查 HWND 是否正确
-3. 注意 `WS_EX_LAYERED` 警告 - 分层窗口可能导致 SetWindowLongPtr 失败
-4. 使用 Windows Spy++ 或类似工具验证窗口句柄
-
-## 常见问题
-
-### 指示器和候选词不显示
-1. 检查 `Hooked window: true` - 如果是 false，hook 失败
-2. 检查 HWND 是否正确 - 使用 `EnumWindows` 验证
-3. 确认输入法已打开（中文模式）
-4. 查看是否有 `WS_EX_LAYERED` 警告
-
-### Hook 失败 (Hooked window: false)
-**可能原因**：
-1. HWND 格式不正确
-2. 窗口已被另一个 Hook 替换
-3. Minecraft 窗口是分层窗口 (WS_EX_LAYERED)
-4. 权限问题
-
-**排查步骤**：
-1. 确认日志显示 `Using HWND from enum: xxx`
-2. 检查 HWND 是否为有效值（通常 > 0x10000）
-3. 查看是否有 `WARNING: Window has WS_EX_LAYERED` 日志
-4. 降级 hook (WH_GETMESSAGE) 应该会自动启用
-
-### DLL 版本不匹配
+### UI Automation 成功日志
 ```
-[ChineseIME] DLL version: 3.0.0
+[ChineseIME] Poll: comp='ni', nativeCandCount=0
+[ChineseIME] IMM32 returned 0 candidates, trying UI Automation...
+[ChineseIME] GetCandidateCountUIA: called
+[ChineseIME] GetCandidateCountUIA: fgPid=6612, currentPid=36788
+[ChineseIME] UIA: Searching for candidates in PID 6612
+[ChineseIME] UIA: found 9 candidates
+[ChineseIME] UI Automation found 9 candidates
 ```
-确保 JAR 中的 DLL 是最新版本（删除旧 JAR 重新构建）
 
-## TSF vs IMM32 vs Hook 架构
+### 调试检查清单
 
-| 组件 | 职责 | 备注 |
+1. **确认 Hook 状态**
+   - `Hooked window: true` - hook 成功
+   - `REJECTED: Window PID X != Current PID Y` - 正常，跨进程 hook 被拒绝
+
+2. **检查候选词来源**
+   - 如果每帧看到 `getFallbackCandidates for mode: PINYIN` → 候选词为空，使用内置词典
+   - 如果看到 `UI Automation found N candidates` → UI Automation 成功
+
+3. **UI Automation 调试**
+   - `GetCandidateCountUIA: called` - 函数被调用
+   - `GetCandidateCountUIA: found N candidates` - 成功
+   - `GetCandidateCountUIA: no candidates found` - 失败（可能候选词窗口不是标准控件）
+
+---
+
+## TSF vs IMM32 vs Hook vs UI Automation 架构
+
+| 组件 | 职责 | 状态 |
 |------|------|------|
-| **WinEventBridge + ImeWndProc** | 主事件驱动路径 | 拦截 WM_IME_* 消息 |
-| **WH_GETMESSAGE/WH_CALLWNDPROC** | Hook 降级路径 | WndProc 失败时自动启用 |
-| **TsfMonitor** | TSF 事件监听 | 补充 IME 类型检测 |
-| **Imm32Monitor** | IMM32 监控 | 降级备用 |
-| **Java Polling** | 轮询降级路径 | 最终保底 |
+| **WinEventBridge + ImeWndProc** | 主事件驱动路径 | ✅ 工作（仅同进程） |
+| **WH_GETMESSAGE/WH_CALLWNDPROC** | Hook 降级路径 | ✅ 工作（仅同进程） |
+| **TsfMonitor** | TSF 事件监听 | ✅ 工作 |
+| **UI Automation (uia_candidate_provider.cpp)** | 跨进程候选词获取 | ⏳ 部分工作 |
+| **Java Polling + 内置词典** | 最终降级 | ✅ 工作 |
 
 **关键洞察**：
-- IMM32 `ImmGetCandidateList` 对大多数输入法都有效
-- 事件驱动失效时自动降级到 hook，hook 失效时自动降级到轮询
-- 当前实现是多层降级，保证稳定性
+- 同进程情况下，IMM32 和事件驱动工作正常
+- 跨进程情况下，IMM32 失败，UI Automation 可能找到候选词（如果候选词窗口是标准 List/ListItem 控件）
+- 最终降级是内置词典，保证始终有候选词可用
 
-## 代码质量问题（待修复）
+---
 
-### P1 - 中等优先级
-1. **`WindowsIMEBridgeNative.update()` 日志过多** - 每帧 stateChanged 都打印日志
-2. **`syncFromWindows()` 是空方法** - 原本设计的状态同步逻辑未实现
-3. **`hasLayoutChanged()` 返回 `false`** - 总是返回 false，无实际功能
+## 代码质量问题
 
-### P2 - 低优先级
-1. **两套回调系统并存** - std::function (WinEventBridge) 和 C-style 函数指针 (ime_bridge.cpp)
-2. **`imm32_monitor.cpp` 使用 `GCS_COMPREADSTR`** - 注释说这是 raw pinyin，可能不适合所有 IME
-3. **魔法数字** - 各种硬编码的尺寸、颜色值等
+### P1 - 当前问题
+1. **候选词同步失败** - IMM32 跨进程失败，UI Automation 尚未成功
+2. **Shift 模式检测不工作** - 待调查
+
+### P2 - 已修复
+1. ✅ **WindowsIMEBridgeNative.update() 日志过多** - 已优化
+2. ✅ **syncFromWindows() 是空方法** - 已移除
+3. ✅ **hasLayoutChanged() 返回 false** - 已标记为 @Deprecated
+4. ✅ **imm32_monitor.cpp 使用 GCS_COMPREADSTR** - 已修复为 GCS_COMPSTR
+5. ✅ **跨进程 PID 验证** - 已添加，拒绝不可靠的跨进程 hook
+6. ✅ **多窗口 fallback** - g_hwnd → foreground → active
+7. ✅ **UI Automation API** - 已实现但尚未成功找到候选词

@@ -125,7 +125,7 @@ public void tick() {
     }
 
     public boolean hasInput() {
-        return hud.isVisible();
+        return hud.isVisible() || verticalHud.isVisible();
     }
 
     public void clearInput() {
@@ -195,7 +195,9 @@ public boolean inputChar(char c) {
         ChineseIMEInitializer.LOGGER.info("[ChineseIME] toggleInputMethod called - on Windows, use system shortcuts to switch IME");
     }
 
-    public static OS getPlatform() {
+    private static final OS CURRENT_PLATFORM = detectPlatform();
+
+    private static OS detectPlatform() {
         String os = System.getProperty("os.name").toLowerCase();
         if (os.contains("win")) {
             return OS.WINDOWS;
@@ -205,6 +207,10 @@ public boolean inputChar(char c) {
             return OS.LINUX;
         }
         return OS.OTHER;
+    }
+
+    public static OS getPlatform() {
+        return CURRENT_PLATFORM;
     }
 
     public String selectCandidate(int index) {

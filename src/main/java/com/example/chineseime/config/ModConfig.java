@@ -31,6 +31,7 @@ public class ModConfig {
     private int toggleScriptKey;
     private List<Integer> toggleImeKeys;
     private List<Integer> toggleChineseModeKeys;
+    private transient boolean dirty = false;
 
     public ModConfig() {
         this.inputMode = InputMode.PINYIN;
@@ -87,8 +88,19 @@ public class ModConfig {
             } finally {
                 writer.close();
             }
+            dirty = false;
         } catch (Exception e) {
             System.err.println("[ChineseIME] 保存配置失败: " + e.getMessage());
+        }
+    }
+
+    private void markDirty() {
+        dirty = true;
+    }
+
+    public void flush() {
+        if (dirty) {
+            save();
         }
     }
 
@@ -96,7 +108,7 @@ public class ModConfig {
 
     public void setInputMode(InputMode mode) {
         this.inputMode = mode;
-        this.save();
+        this.markDirty();
     }
 
     public ScriptType getScriptType() { return this.scriptType; }
@@ -104,7 +116,7 @@ public class ModConfig {
     public void setScriptType(ScriptType type) {
         if (!this.windowsLocked) {
             this.scriptType = type;
-            this.save();
+            this.markDirty();
         }
     }
 
@@ -113,7 +125,7 @@ public class ModConfig {
     public void setChineseMode(boolean mode) {
         if (!this.windowsLocked) {
             this.chineseMode = mode;
-            this.save();
+            this.markDirty();
         }
     }
 
@@ -124,72 +136,80 @@ public class ModConfig {
 
     public void setHudScale(int scale) {
         this.hudScale = scale;
-        this.save();
+        this.markDirty();
     }
 
     public int getMaxCandidates() { return this.maxCandidates; }
 
     public void setMaxCandidates(int max) {
         this.maxCandidates = max;
-        this.save();
+        this.markDirty();
     }
 
     public boolean isPreferRime() { return this.preferRime; }
 
     public void setPreferRime(boolean prefer) {
         this.preferRime = prefer;
-        this.save();
+        this.markDirty();
     }
 
     public String getRimeSchema() { return this.rimeSchema; }
 
     public void setRimeSchema(String schema) {
         this.rimeSchema = schema;
-        this.save();
+        this.markDirty();
     }
 
     public void toggleChineseMode() {
         if (!this.windowsLocked) {
             this.chineseMode = !this.chineseMode;
-            this.save();
+            this.markDirty();
         }
     }
 
     public void toggleScriptType() {
         if (!this.windowsLocked) {
             this.scriptType = this.scriptType == ScriptType.SIMPLIFIED ? ScriptType.TRADITIONAL : ScriptType.SIMPLIFIED;
-            this.save();
+            this.markDirty();
         }
     }
 
     public void cycleInputMode() {
-        InputMode[] modes = InputMode.values();
-        this.inputMode = modes[(this.inputMode.ordinal() + 1) % modes.length];
-        this.save();
+        if (this.windowsLocked) {
+            if (this.inputMode == InputMode.PINYIN) {
+                this.inputMode = InputMode.RIME;
+            } else {
+                this.inputMode = InputMode.PINYIN;
+            }
+        } else {
+            InputMode[] modes = InputMode.values();
+            this.inputMode = modes[(this.inputMode.ordinal() + 1) % modes.length];
+        }
+        this.markDirty();
     }
 
     public int getToggleImeKey() { return this.toggleImeKey; }
 
     public void setToggleImeKey(int key) {
         this.toggleImeKey = key;
-        this.save();
+        this.markDirty();
     }
 
     public void clearToggleImeKey() {
         this.toggleImeKey = -1;
-        this.save();
+        this.markDirty();
     }
 
     public int getToggleChineseModeKey() { return this.toggleChineseModeKey; }
 
     public void setToggleChineseModeKey(int key) {
         this.toggleChineseModeKey = key;
-        this.save();
+        this.markDirty();
     }
 
     public void clearToggleChineseModeKey() {
         this.toggleChineseModeKey = -1;
-        this.save();
+        this.markDirty();
     }
 
     public List<Integer> getToggleImeKeys() {
@@ -198,7 +218,7 @@ public class ModConfig {
 
     public void setToggleImeKeys(List<Integer> keys) {
         this.toggleImeKeys = keys != null ? new ArrayList<>(keys) : new ArrayList<>();
-        this.save();
+        this.markDirty();
     }
 
     public List<Integer> getToggleChineseModeKeys() {
@@ -207,26 +227,26 @@ public class ModConfig {
 
     public void setToggleChineseModeKeys(List<Integer> keys) {
         this.toggleChineseModeKeys = keys != null ? new ArrayList<>(keys) : new ArrayList<>();
-        this.save();
+        this.markDirty();
     }
 
     public int getToggleScriptKey() { return this.toggleScriptKey; }
 
     public void setToggleScriptKey(int key) {
         this.toggleScriptKey = key;
-        this.save();
+        this.markDirty();
     }
 
     public void clearToggleScriptKey() {
         this.toggleScriptKey = -1;
-        this.save();
+        this.markDirty();
     }
 
     public void resetAllKeybinds() {
         this.toggleImeKey = -1;
         this.toggleChineseModeKey = -1;
         this.toggleScriptKey = -1;
-        this.save();
+        this.markDirty();
     }
 
     public void resetToDefaults() {
@@ -240,7 +260,7 @@ public class ModConfig {
         this.toggleImeKey = -1;
         this.toggleChineseModeKey = -1;
         this.toggleScriptKey = -1;
-        this.save();
+        this.markDirty();
     }
 
     public String getShortcutKey() {
@@ -250,6 +270,6 @@ public class ModConfig {
 
     public void setShortcutKey(String key) {
         this.toggleImeKey = -1;
-        this.save();
+        this.markDirty();
     }
 }

@@ -45,6 +45,7 @@ struct WinEventBridge {
 
     void setCallbacks(EventCallbacks&& callbacks);
     void hookWindow(HWND hwnd);
+    void setTargetWindow(HWND hwnd) { targetWindow_ = hwnd; }
     void unhookWindow();
     // Refresh candidates — called from Java via RefreshCandidates export
     void refreshCandidates();

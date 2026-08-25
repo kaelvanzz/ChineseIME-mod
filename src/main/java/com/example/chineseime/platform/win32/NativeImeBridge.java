@@ -161,6 +161,12 @@ public class NativeImeBridge {
         }
     }
 
+    public static void refreshImeState() {
+        if (isAvailable()) {
+            INSTANCE.RefreshImeState();
+        }
+    }
+
     public static boolean isWindowHooked() {
         return isAvailable() && INSTANCE.IsWindowHooked() == 1;
     }
@@ -243,6 +249,36 @@ public class NativeImeBridge {
         };
     }
 
+    public static int getCandidateCountUIA() {
+        if (!isAvailable()) return 0;
+        try {
+            return INSTANCE.GetCandidateCountUIA();
+        } catch (Exception e) {
+            ChineseIMEInitializer.LOGGER.warn("[ChineseIME] getCandidateCountUIA failed: {}", e.getMessage());
+            return 0;
+        }
+    }
+
+    public static List<String> getCandidatesViaUIA() {
+        List<String> result = new ArrayList<>();
+        if (!isAvailable()) return result;
+        try {
+            int count = INSTANCE.GetCandidateCountUIA();
+            if (count <= 0) return result;
+            char[][] buffer = new char[count][64];
+            int actualCount = INSTANCE.GetCandidatesViaUIA(count, buffer);
+            for (int i = 0; i < actualCount; i++) {
+                String cand = new String(buffer[i]).trim();
+                if (!cand.isEmpty()) {
+                    result.add(cand);
+                }
+            }
+        } catch (Exception e) {
+            ChineseIMEInitializer.LOGGER.warn("[ChineseIME] getCandidatesViaUIA failed: {}", e.getMessage());
+        }
+        return result;
+    }
+
     public static String getInputMethodTypeString(int type) {
         return switch (type) {
             case IME_TYPE_ENGLISH -> "En";
@@ -280,5 +316,11 @@ public class NativeImeBridge {
         void RefreshCandidates();
         void SetEventCallbacks(PreeditCallback preedit, CommitCallback commit,
                                CandidatesCallback candidates, ImeChangeCallback imeChange);
+        int StartTsfListen();
+        void StopTsfListen();
+        int IsTsfListening();
+        void RefreshImeState();
+        int GetCandidateCountUIA();
+        int GetCandidatesViaUIA(int maxCandidates, char[][] candidates);
     }
 }

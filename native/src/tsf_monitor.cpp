@@ -528,9 +528,6 @@ STDMETHODIMP TsfMonitor::OnActivated(DWORD dwProfileType, LANGID langid, REFCLSI
         ImeStateManager::get().updateChineseMode(chineseMode_);
         ImeStateManager::get().updateImeOpen(imeOpen);
 
-        // Notify Java via WinEventBridge (TSF-initiated state change)
-        WinEventBridge::get().fireImeModeChangeCallback(
-            static_cast<int>(currentInputMethod_), chineseMode_);
     }
 
     return S_OK;
@@ -547,9 +544,6 @@ STDMETHODIMP TsfMonitor::OnChange(REFGUID rguid) {
                 updateCache();
             }
 
-            // Notify Java via WinEventBridge (mode toggled by user via TSF)
-            WinEventBridge::get().fireImeModeChangeCallback(
-                static_cast<int>(currentInputMethod_), newChineseMode);
         }
     }
     return S_OK;
@@ -633,6 +627,9 @@ void TsfMonitor::updateCache() {
     sprintf_s(dbg, "[ChineseIME] updateCache: TSF ctx=%p (STA tid=%u)\n", ctx, GetCurrentThreadId());
     OutputDebugStringA(dbg);
     if (ctx) {
+        if (context_ != ctx) {
+            registerSinks(ctx);
+        }
         getCompositionString(ctx, composition);
         if (getCandidateList(ctx, candidates, selectedIndex)) {
             candidatesFound = true;
@@ -828,24 +825,10 @@ ITfContext* TsfMonitor::getCurrentContext() {
 }
 
 void TsfMonitor::notifyStateChanges(const IMEState& oldState, const IMEState& newState) {
-    // Notify Java via WinEventBridge (TSF-initiated composition/candidate change)
-    if (oldState.composition != newState.composition || oldState.candidates != newState.candidates) {
-        std::vector<const wchar_t*> candidatePtrs;
-        for (const auto& cand : newState.candidates) {
-            candidatePtrs.push_back(cand.c_str());
-        }
-        WinEventBridge::get().fireCandidateCallback(
-            newState.composition.c_str(),
-            candidatePtrs.empty() ? nullptr : candidatePtrs.data(),
-            static_cast<int>(newState.candidates.size()),
-            newState.selectedIndex
-        );
-    }
-
-    if (oldState.inputMethodType != newState.inputMethodType || oldState.chineseMode != newState.chineseMode) {
-        WinEventBridge::get().fireImeModeChangeCallback(
-            static_cast<int>(newState.inputMethodType), newState.chineseMode);
-    }
+    // TSF callbacks run on the native STA. Java reads the synchronized state on
+    // the client tick instead of receiving UI updates from this foreign thread.
+    (void)oldState;
+    (void)newState;
 }
 
 bool TsfMonitor::getCompositionString(ITfContext* pic, std::wstring& result) {

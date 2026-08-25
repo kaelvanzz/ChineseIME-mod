@@ -7,6 +7,8 @@
 #include <mutex>
 #include <condition_variable>
 #include <atomic>
+#include <chrono>
+#include <future>
 
 namespace chineseime {
 
@@ -22,6 +24,7 @@ public:
     bool start();
     void stop();
     void submitTask(Task task);
+    bool submitTaskAndWait(Task task, int timeoutMs = 5000);
     bool waitForReady(int timeoutMs = 5000);
     bool isRunning() const { return running_.load(); }
     DWORD getThreadId() const { return threadId_; }

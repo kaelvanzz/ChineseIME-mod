@@ -4,7 +4,9 @@ import com.example.chineseime.engine.InputMode;
 import com.example.chineseime.engine.ScriptType;
 import com.example.chineseime.platform.PlatformIMEManager;
 import net.minecraft.client.MinecraftClient;
+import net.minecraft.client.gui.Click;
 import net.minecraft.client.gui.DrawContext;
+import net.minecraft.client.input.KeyInput;
 import net.minecraft.client.gui.screen.Screen;
 import net.minecraft.text.Text;
 import org.lwjgl.glfw.GLFW;
@@ -117,7 +119,7 @@ public class ConfigScreen extends Screen {
         hoveredIndex = getHoveredItem(mx, my);
 
         ctx.fill(panelX, panelY, panelX + panelW, panelY + panelH, ITEM_BG);
-        ctx.drawBorder(panelX, panelY, panelW, panelH, BORDER_COLOR);
+        drawBorder(ctx, panelX, panelY, panelW, panelH, BORDER_COLOR);
 
         Text title = Text.literal("ChineseIME 设置");
         int titleW = this.textRenderer.getWidth(title);
@@ -181,7 +183,7 @@ public class ConfigScreen extends Screen {
         int sliderY = y + (ITEM_H - SLIDER_H) / 2;
         int sliderColor = isWindows ? 0x66666666 : BORDER_COLOR;
         if (isWindows) {
-            ctx.drawBorder(sliderX, sliderY, SLIDER_W, SLIDER_H, 0x66666666);
+            drawBorder(ctx, sliderX, sliderY, SLIDER_W, SLIDER_H, 0x66666666);
             ctx.fill(sliderX + 2, sliderY + 2, sliderX + SLIDER_W - 2, sliderY + SLIDER_H - 2, 0x66000000);
         } else {
             renderSlider(ctx, sliderX, sliderY, SLIDER_W, config.getMaxCandidates(), 5, 9);
@@ -278,7 +280,7 @@ public class ConfigScreen extends Screen {
 
         ctx.fill(btnX, btnY, btnX + btnW, btnY + btnH, HOVER_BG);
         if (hovered) ctx.fill(btnX, btnY, btnX + btnW, btnY + btnH, 0x88555555);
-        ctx.drawBorder(btnX, btnY, btnW, btnH, BORDER_COLOR);
+        drawBorder(ctx, btnX, btnY, btnW, btnH, BORDER_COLOR);
 
         Text text = Text.literal("恢复默认设置");
         int textW = this.textRenderer.getWidth(text);
@@ -288,7 +290,7 @@ public class ConfigScreen extends Screen {
     private void renderSlider(DrawContext ctx, int x, int y, int w, int value, int min, int max) {
         float ratio = (float)(value - min) / (max - min);
         int fillW = (int)(ratio * (w - 4));
-        ctx.drawBorder(x, y, w, SLIDER_H, BORDER_COLOR);
+        drawBorder(ctx, x, y, w, SLIDER_H, BORDER_COLOR);
         ctx.fill(x + 2, y + 2, x + 2 + fillW, y + SLIDER_H - 2, BORDER_COLOR);
         ctx.fill(x + 2 + fillW, y + 2, x + w - 2, y + SLIDER_H - 2, 0x88000000);
     }
@@ -365,6 +367,13 @@ public class ConfigScreen extends Screen {
         return relX;
     }
 
+    private static void drawBorder(DrawContext ctx, int x, int y, int width, int height, int color) {
+        ctx.fill(x, y, x + width, y + 1, color);
+        ctx.fill(x, y + height - 1, x + width, y + height, color);
+        ctx.fill(x, y + 1, x + 1, y + height - 1, color);
+        ctx.fill(x + width - 1, y + 1, x + width, y + height - 1, color);
+    }
+
     private int getHoveredClearBtn(int mx, int my, int itemIndex) {
         if (itemIndex < 0 || itemIndex >= items.size()) return -1;
         Item item = items.get(itemIndex);
@@ -382,9 +391,9 @@ public class ConfigScreen extends Screen {
     }
 
     @Override
-    public boolean mouseClicked(double mouseX, double mouseY, int button) {
-        int mx = (int) mouseX;
-        int my = (int) mouseY;
+    public boolean mouseClicked(Click click, boolean doubled) {
+        int mx = (int) click.x();
+        int my = (int) click.y();
         this.mouseX = mx;
         this.mouseY = my;
 
@@ -475,12 +484,12 @@ public class ConfigScreen extends Screen {
     }
 
     @Override
-    public boolean mouseDragged(double mouseX, double mouseY, int button, double deltaX, double deltaY) {
-        int mx = (int) mouseX;
-        int my = (int) mouseY;
+    public boolean mouseDragged(Click click, double deltaX, double deltaY) {
+        int mx = (int) click.x();
+        int my = (int) click.y();
 
         int idx = getHoveredItem(mx, my);
-        if (idx == -1 || button != 0) return false;
+        if (idx == -1 || click.button() != 0) return false;
 
         Item item = items.get(idx);
         switch (item.type) {
@@ -512,7 +521,8 @@ public class ConfigScreen extends Screen {
     }
 
     @Override
-    public boolean keyPressed(int keyCode, int scanCode, int modifiers) {
+    public boolean keyPressed(KeyInput input) {
+        int keyCode = input.key();
         if (waitingForKeybind) {
             if (keyCode == GLFW.GLFW_KEY_ESCAPE) {
                 waitingForKeybind = false;
@@ -549,7 +559,7 @@ public class ConfigScreen extends Screen {
             close();
             return true;
         }
-        return super.keyPressed(keyCode, scanCode, modifiers);
+        return super.keyPressed(input);
     }
 
     private String getKeybindDisplay(List<Integer> keyCodes) {
@@ -564,6 +574,7 @@ public class ConfigScreen extends Screen {
 
     @Override
     public void close() {
+        config.flush();
         client.setScreen(parent);
     }
 }
